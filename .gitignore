@@ -1,0 +1,6 @@
+/.venv/
+__pycache__/
+*.pyc
+/src/
+/tests/
+*.toml
