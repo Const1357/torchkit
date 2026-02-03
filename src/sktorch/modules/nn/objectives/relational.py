@@ -9,6 +9,9 @@ Implemented Relational Objectives:
 
 from sktorch.modules.nn.objectives._base import LossOut, RelationalObjective
 import torch.nn.functional as F
+from torch import Tensor
+
+from typing import Mapping
 
 
 class CrossEntropyLoss(RelationalObjective):
@@ -43,7 +46,7 @@ class CrossEntropyLoss(RelationalObjective):
       Specifies the reduction to apply to the output:
         - `"mean"`: average loss over the batch (recommended)
         - `"sum"`: sum loss over the batch
-        
+
       Note: `"none"` is not supported here because this framework requires
       objectives to return a scalar loss tensor.
 
@@ -88,7 +91,7 @@ class CrossEntropyLoss(RelationalObjective):
         )
         self._reduction = reduction
 
-    def loss(self, predictions, targets):
+    def loss(self, predictions: Mapping[str, Tensor], targets: Mapping[str, Tensor]) -> LossOut:
         """
         Compute the cross-entropy loss.
 

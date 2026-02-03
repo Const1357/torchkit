@@ -9,9 +9,15 @@ Implemented Intrinsic Objectives:
 import torch    # for Tensor operations
 from typing import Literal
 from sktorch.modules.nn.objectives._base import LossOut, IntrinsicObjective
+from sktorch.modules.nn.objectives._mixins.signed_intrinsic import SignedIntrinsicObjectiveMixin
+
+from __future__ import annotations
+
+from typing import Literal, Any, Dict, Mapping
+from torch import Tensor
 
 
-class EntropyTerm(IntrinsicObjective):
+class EntropyTerm(SignedIntrinsicObjectiveMixin, IntrinsicObjective):
     """
     Entropy regularization term.
 
@@ -87,15 +93,15 @@ class EntropyTerm(IntrinsicObjective):
                 f"('maximize','minimize'), got {direction!r}."
             )
 
-        super().__init__(
+        IntrinsicObjective.__init__(
             name=name,
             required=required,
             weight=weight,
             required_pred_keys=("clf/probs",),
         )
-        self._direction = direction
+        SignedIntrinsicObjectiveMixin.__init__(self, direction=direction)
 
-    def loss(self, predictions):
+    def loss(self, predictions: Mapping[str, Tensor]) -> LossOut:
         """
         Compute the entropy-based loss according to the chosen direction.
 
@@ -108,14 +114,7 @@ class EntropyTerm(IntrinsicObjective):
         - `LossOut` containing a scalar loss tensor to be **minimized**.
         """
         probs = predictions["clf/probs"].clamp_min(1e-10)
-        entropy = -(probs * probs.log()).sum(dim=1).mean()
+        entropy = -(probs * probs.log()).sum(dim=1).mean()  # scalar
 
-        # framework minimizes losses:
-        # - maximize entropy -> minimize negative entropy
-        # - minimize entropy -> minimize entropy directly
-        loss = -entropy if self._direction == "maximize" else entropy
-
-        return LossOut(
-            loss=loss,
-            details={"direction": self._direction},
-        )
+        loss = self._apply_direction(entropy)  # maximize => minimize -entropy
+        return LossOut(loss=loss, details=self._with_direction_details({}))
