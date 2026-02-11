@@ -26,12 +26,210 @@ class MultitaskerOut:
 
 class SKTorchMultitasker(SKTorchEstimatorBase, ABC):
     """
-    Multitask interface.
+    Multi-task sklearn-compatible neural network interface with routing.
 
-    Notes for backbone designers:
-    - If your backbone can save compute by skipping branches, implement a kwarg:
+    This class builds a shared backbone and multiple task-specific
+    (adapter → head) pipelines. On each forward pass, it routes backbone
+    features to the correct task pipelines based on `active_tasks`.
+
+    It supports compute gating for compatible backbones: if the backbone
+    accepts a `requested_features: set[str] | None` kwarg, the multitasker
+    will request only the feature keys needed for the active tasks.
+
+    ------------------------------------------------------------------
+
+    Expected component contracts (routing-critical):
+
+    Backbone:
+    + Must be an `nn.Module`
+    + Forward must return `BackboneOut`
+      containing:
+        - `features: dict[str, Tensor | None]`
+        - `details: Dict[str, Any]`
+    + `features` MUST be a dict (routing relies on string keys).
+      Missing keys or keys with value None are treated as "not computed".
+    + Each routed feature tensor must be at least 2D:
+        [BatchDimension, ...]
+    + Optional compute gating:
+        If the backbone forward signature contains `requested_features`,
+        the multitasker will call:
+            backbone(X, requested_features={<feature keys>}, **backbone_fwd_args)
+        and expects the backbone to compute/return only those requested keys.
+
+    Adapter (per task):
+    + Must derive from `_BaseAdapter`
+    + Called as:
+        adapter(feature_tensor, **adapter_fwd_args[task_name])
+    + Output must be a `Tensor` and must be at least 2D:
+        [BatchDimension, ...]
+
+    Head (per task):
+    + Must be an `nn.Module`
+    + Constructed lazily via `ModuleFactory.from_input(dummy_tensor)`
+      where `dummy_tensor` is the adapter output for that task.
+    + Called as:
+        head(adapter_out, **head_fwd_args[task_name])
+    + The multitasker does not enforce a specific return type for head outputs.
+      If the returned object has an attribute `.details` of type `dict`,
+      it is collected into `heads_details[task_name]`.
+
+    ------------------------------------------------------------------
+
+    Initialization parameters:
+
+    + backbone_factory (ModuleFactory):
+        Factory used to lazily construct the shared backbone.
+
+    + head_factories (Mapping[str, ModuleFactory]):
+        Task mapping: task_name -> head factory.
+        Task order is the insertion order of this mapping.
+
+    + adapter_factories (Mapping[str, AdapterFactory] | None):
+        Task mapping: task_name -> adapter factory.
+        If None, every task uses IdentityAdapter.
+        Keys must exactly match `head_factories` keys.
+
+    + backbone_feature_for_task (Mapping[str, str]):
+        Routing map: task_name -> backbone feature key.
+        Keys must exactly match `head_factories` keys.
+        During forward, each task consumes:
+            backbone_out.features[ backbone_feature_for_task[task_name] ]
+
+    + device / dtype:
+        Passed to `SKTorchEstimatorBase`.
+
+    ------------------------------------------------------------------
+
+    Lazy initialization:
+
+    + Backbone is constructed on first forward call.
+      Backbone capability is detected once by checking whether its forward
+      signature contains a `requested_features` parameter.
+
+    + Each task's adapter is constructed on first use of that task.
+
+    + Each task's head is constructed lazily on first use of that task,
+      using the task's adapter output as the `from_input(...)` dummy.
+
+    ------------------------------------------------------------------
+
+    Active tasks and routing behavior:
+
+    + active_tasks (Iterable[str] | None):
+        - If None: all tasks are active.
+        - Otherwise: must be a subset of known task names.
+          Unknown tasks raise KeyError.
+        - Task execution order is stable and follows `head_factories` order.
+
+    + For the active tasks, the multitasker computes the set of required
+      backbone feature keys:
+          requested_keys = { backbone_feature_for_task[t] for t in active_tasks }
+
+    + After the backbone forward pass, for each (task_name, feature_key):
+        - If `feature_key` is missing from `features`, OR its value is None:
+            raise KeyError (feature required for an active task was not provided)
+        - If the value is not a Tensor:
+            raise TypeError
+        - If the Tensor has ndim < 2:
+            raise ValueError
+        - Otherwise it is passed through the task adapter and then the task head.
+
+    ------------------------------------------------------------------
+
+    Fitted-task enforcement:
+
+    + enforce_fitted (bool):
+        If True, requires that all active tasks are marked fitted in `task_fitted_`.
+        If any active task is not fitted, raises RuntimeError.
+
+    Trainer-facing fitted attributes (persisted across save/load):
+    + task_names_: tuple[str, ...]        (defaults to head_factories keys)
+    + task_info_: Dict[str, Dict[str, Any]]
+    + task_fitted_: Dict[str, bool]      (defaults to False for all tasks)
+    + is_fitted_ (inherited)
+
+    ------------------------------------------------------------------
+
+    Forward behavior:
+
+        forward(X, *, active_tasks=None, ...) -> MultitaskerOut
+
+    Returns a `MultitaskerOut` containing:
+    + heads_out: Dict[str, Any]
+        Per-task head outputs, keyed by task name.
+
+    + backbone_details: Dict[str, Any]
+        Copied from `BackboneOut.details`.
+
+    + heads_details: Dict[str, Any]
+        Per-task details dicts, collected only when the head output object
+        has `.details` and it is a dict.
+
+    No loss computation is performed here.
+    Training should be handled externally (e.g., via `SKTorchTrainer`).
+
+    ------------------------------------------------------------------
+
+    Notes for backbone designers (compute gating):
+
+    If your backbone can save compute by skipping branches, implement a kwarg:
         requested_features: set[str] | None
-      and only compute/return those features (omit others from the dict).
+    and compute/return only those requested keys (omit others or set them to None).
+
+    ## Example usage:
+    ```python
+    from sktorch.modules.nn.models.factory import ModuleFactory
+    from sktorch.modules.nn.FeatureAdapters import AdapterFactory
+
+    # Shared backbone
+    backbone_factory = ModuleFactory(
+        cls_path="my_package.models:MyBackbone",
+        kwargs={"hidden_dim": 256},
+    )
+
+    # Two tasks: classification + regression
+    head_factories = {
+        "cls": ModuleFactory(
+            cls_path="sktorch.modules.nn.models.heads.classification:MLPClassificationHead",
+            kwargs={"num_classes": 4},
+        ),
+        "reg": ModuleFactory(
+            cls_path="sktorch.modules.nn.models.heads.regression:MLPRegressionHead",
+            kwargs={"out_dim": 1},
+        ),
+    }
+
+    # Optional per-task adapters (IdentityAdapter used if omitted)
+    adapter_factories = {
+        "cls": AdapterFactory(cls_path="sktorch.modules.nn.FeatureAdapters:IdentityAdapter"),
+        "reg": AdapterFactory(cls_path="sktorch.modules.nn.FeatureAdapters:IdentityAdapter"),
+    }
+
+    # Route tasks to specific backbone feature keys
+    backbone_feature_for_task = {
+        "cls": "shared_features",
+        "reg": "shared_features",
+    }
+
+    model = SKTorchMultitasker(
+        backbone_factory=backbone_factory,
+        head_factories=head_factories,
+        adapter_factories=adapter_factories,
+        backbone_feature_for_task=backbone_feature_for_task,
+        device="cuda",
+    )
+
+    X = torch.randn(8, 3, 224, 224)
+
+    # Run both tasks
+    out = model(X)
+
+    cls_out = out.heads_out["cls"]
+    reg_out = out.heads_out["reg"]
+
+    # Run only classification task
+    out_cls_only = model(X, active_tasks=["cls"])
+    ```
     """
 
     def __init__(

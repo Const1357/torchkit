@@ -25,6 +25,100 @@ class RegressorOut:
 
 # regressor interface class
 class SKTorchRegressor(SKTorchEstimatorBase, ABC):
+    """
+    Generic sklearn-compatible neural network regressor.
+
+    This class composes three modular components:
+
+    + Backbone → produces feature representations
+    + Feature Adapter → transforms backbone features into head-ready input
+    + Head → produces regression predictions
+
+    It works out of the box for a single backbone and a single head.
+    No routing, multi-branch logic, or multi-task mechanisms are implemented.
+
+    The regressor is compatible with any backbone / adapter / head combination
+    that satisfies the required interface contracts.
+
+    ------------------------------------------------------------------
+
+    Expected component contracts:
+
+    Backbone:
+    + Must be an `nn.Module`
+    + Forward must return `BackboneOut`
+      containing:
+        - `features: Tensor`
+        - `details: Dict[str, Any]`
+    + `features` must be at least 2D:
+        [BatchDimension, D, ...]
+
+    Adapter:
+    + Must derive from `_BaseAdapter`
+    + Forward maps backbone features → head input
+    + Output must be at least 2D:
+        [BatchDimension, D, ...]
+
+    Head:
+    + Must be an `nn.Module`
+    + Forward must return `RegressorHeadOut`
+      containing:
+        - `pred: Tensor`
+        - `details: Dict[str, Any]`
+
+    ------------------------------------------------------------------
+
+    Initialization parameters:
+
+    + backbone_factory (ModuleFactory):
+        Factory used to lazily construct the backbone.
+
+    + adapter_factory (AdapterFactory | None):
+        Factory for the feature adapter.
+        If None, defaults to IdentityAdapter.
+
+    + head_factory (ModuleFactory):
+        Factory used to lazily construct the regression head.
+        Head is initialized based on the adapter output shape.
+
+    + device / dtype:
+        Passed to `SKTorchEstimatorBase`.
+
+    ------------------------------------------------------------------
+
+    Lazy initialization:
+
+    The backbone, adapter, and head are constructed lazily on first forward pass.
+    This allows the head to infer its input dimensionality from real data.
+
+    ------------------------------------------------------------------
+
+    Forward behavior:
+
+        forward(X) -> RegressorOut
+
+    Returns a `RegressorOut` containing:
+    + pred (Tensor)
+    + backbone_details (Dict)
+    + reg_details (Dict)
+
+    No loss computation is performed here.
+    Training should be handled externally (e.g., via `SKTorchTrainer`).
+
+    ------------------------------------------------------------------
+
+    Fitted attributes:
+
+    + `is_fitted_` (managed by training logic)
+
+    ------------------------------------------------------------------
+
+    Invariants:
+
+    - Features and head inputs must have batch dimension first.
+    - No implicit reduction, routing, or multi-task logic is performed.
+    - This class assumes a single-output regression head.
+    """
 
     def __init__(
         self,

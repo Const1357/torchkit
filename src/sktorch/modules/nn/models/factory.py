@@ -15,6 +15,8 @@ class ModuleFactory:
     2. from_input(dummy): constructs the module by inferring necessary parameters (like input shape) from a dummy input tensor. This requires that the target class's __init__ method accepts either a 'dummy' argument or an 'input_shape' argument.
     3. from_dict(): constructs the module from a dictionary of parameters, useful for deserialization.
     This factory should be used for the creation of all backbones and heads.
+
+    Supports `to_dict()` for serialization, and `from_dict()` for deserialization.
     """
 
     cls_path: str

@@ -28,6 +28,111 @@ class ClassifierOut:
 
 # classifier interface class
 class SKTorchClassifier(SKTorchEstimatorBase, ABC):
+    """
+    Generic sklearn-compatible neural network classifier.
+
+    This class composes three modular components:
+
+    + Backbone  → produces feature representations
+    + Feature Adapter → transforms backbone features into head-ready input
+    + Head → produces classification logits
+
+    It works out of the box for a single backbone and a single head.
+    No routing, multi-branch logic, or multi-task mechanisms are implemented.
+
+    The classifier is compatible with any backbone / adapter / head combination
+    that satisfies the required interface contracts.
+
+    ------------------------------------------------------------------
+
+    Expected component contracts:
+
+    Backbone:
+    + Must be an `nn.Module`
+    + Forward must return `BackboneOut`
+      containing:
+        - `features: Tensor`
+        - `details: Dict[str, Any]`
+    + `features` must be at least 2D:
+        [BatchDimension, D, ...]
+
+    Adapter:
+    + Must derive from `_BaseAdapter`
+    + Forward maps backbone features → head input
+    + Output must be at least 2D:
+        [BatchDimension, D, ...]
+
+    Head:
+    + Must be an `nn.Module`
+    + Forward must return `ClassifierHeadOut`
+      containing:
+        - `logits: Tensor`
+        - `details: Dict[str, Any]`
+
+    ------------------------------------------------------------------
+
+    Initialization parameters:
+
+    + classes (np.ndarray | None):
+        Optional list of class labels.
+        If provided, immediately exposed as `classes_`.
+        Otherwise, the trainer may infer and set `classes_` during fitting.
+
+    + backbone_factory (ModuleFactory):
+        Factory used to lazily construct the backbone.
+
+    + adapter_factory (AdapterFactory | None):
+        Factory for the feature adapter.
+        If None, defaults to IdentityAdapter.
+
+    + head_factory (ModuleFactory):
+        Factory used to lazily construct the classification head.
+        Head is initialized based on the adapter output shape.
+
+    + return_probs (bool):
+        If True, `forward()` also returns softmax probabilities.
+        Otherwise, only logits are returned.
+
+    + device / dtype:
+        Passed to `SKTorchEstimatorBase`.
+
+    ------------------------------------------------------------------
+
+    Lazy initialization:
+
+    The backbone, adapter, and head are constructed lazily on first forward pass.
+    This allows the head to infer its input dimensionality from real data.
+
+    ------------------------------------------------------------------
+
+    Forward behavior:
+
+        forward(X) -> ClassifierOut
+
+    Returns a `ClassifierOut` containing:
+    + logits (Tensor)
+    + probs (Tensor | None)
+    + backbone_details (Dict)
+    + clf_details (Dict)
+
+    No loss computation is performed here.
+    Training should be handled externally (e.g., via `SKTorchTrainer`).
+
+    ------------------------------------------------------------------
+
+    Fitted attributes:
+
+    + `classes_` (if provided or set during training)
+    + `is_fitted_` (managed by training logic)
+
+    ------------------------------------------------------------------
+
+    Invariants:
+
+    - Features and head inputs must have batch dimension first.
+    - No implicit reduction, routing, or multi-task logic is performed.
+    - This class assumes a single-output classification head.
+    """
 
     def __init__(
         self,

@@ -7,3 +7,6 @@
 
 # it should expose options for batchnorm/layernorm, dropout, and activation functions.
 # it should be compatible with the SKTorchClassifier interface, and be able to be instantiated by a ModuleFactory.
+
+
+# must take parameter num_classes, and use that to determine output dimension

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 import os
 from typing import Any, Dict, Mapping
 
@@ -14,6 +13,51 @@ from sklearn.base import BaseEstimator
 from sktorch.modules.nn._util import _as_device
 
 class SKTorchEstimatorBase(BaseEstimator, nn.Module, ABC):
+    """
+    Base class for sklearn-compatible PyTorch models.
+
+    This class allows a PyTorch `nn.Module` to behave like a scikit-learn
+    estimator while preserving full `state_dict` semantics.
+
+    What this provides:
+    + sklearn parameter introspection (`get_params`, `set_params`)
+    + device and dtype management
+    + consistent (de)serialization via `save()` / `load()`
+    + persistence of fitted attributes (those ending with "_")
+
+    Device & dtype:
+    + The model is moved to the resolved device at initialization.
+    + `_to_tensor()` converts NumPy-like inputs to tensors on the configured
+      device and dtype.
+
+    Fitting behavior:
+    + `fit()` is NOT implemented at this level.
+      Training should typically be handled by wrapping the model inside
+      `SKTorchTrainer`.
+    + After training, subclasses should set:
+        `self.is_fitted_ = True`
+      and may define additional fitted attributes (e.g., `classes_`,
+      `n_outputs_`, etc.).
+
+    Checkpoint format:
+    Calling `save(path)` stores:
+    + class metadata (module + class name)
+    + constructor parameters (serialized)
+    + model `state_dict`
+    + fitted attributes
+
+    Loading via `load(path)` reconstructs:
+    + the estimator instance
+    + constructor arguments
+    + model weights
+    + fitted state
+
+    Subclass responsibilities:
+    + Implement `forward(...)`.
+    + Optionally implement `fit(...)` (or rely on `SKTorchTrainer`).
+    + Extend `_fitted_state_keys()` if additional fitted attributes
+      must persist across save/load.
+    """
 
     def __init__(
         self,
