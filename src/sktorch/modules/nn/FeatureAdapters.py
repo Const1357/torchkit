@@ -128,6 +128,18 @@ class AdapterFactory:
         if not isinstance(adapter, _BaseAdapter):
             raise TypeError(f"Factory {self.cls_path}: Built object is not a _BaseAdapter, got {type(adapter)}.")
         return adapter
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert the factory to a dictionary for serialization."""
+        return {
+            "__type__": "AdapterFactory",
+            "cls_path": self.cls_path,
+            "kwargs": self.kwargs,
+        }
+    
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "AdapterFactory":
+        return cls(cls_path=d["cls_path"], kwargs=d.get("kwargs", {}))
 
 # utilities
 def _spatial_dims(x: Tensor) -> tuple[int, ...]:

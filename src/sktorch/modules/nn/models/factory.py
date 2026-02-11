@@ -13,7 +13,7 @@ class ModuleFactory:
     It supports two main methods of construction:
     1. build(): constructs the module directly from the stored cls_path and kwargs.
     2. from_input(dummy): constructs the module by inferring necessary parameters (like input shape) from a dummy input tensor. This requires that the target class's __init__ method accepts either a 'dummy' argument or an 'input_shape' argument.
-    
+    3. from_dict(): constructs the module from a dictionary of parameters, useful for deserialization.
     This factory should be used for the creation of all backbones and heads.
     """
 
@@ -49,3 +49,16 @@ class ModuleFactory:
         else:
             raise ValueError(f"Factory {self.cls_path}: Class {cls}.__init__ does not accept 'dummy' or 'input_shape', cannot use ModuleFactory.from_input().")
     
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert the factory to a dictionary for serialization."""
+        return {
+            "__type__": "ModuleFactory",
+            "cls_path": self.cls_path,
+            "kwargs": self.kwargs,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "ModuleFactory":
+        return cls(cls_path=d["cls_path"], kwargs=dict(d.get("kwargs", {})))
+    
+

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-import inspect
 import os
 from typing import Any, Dict, Mapping
 
@@ -10,35 +9,11 @@ import numpy as np
 from torch import nn, Tensor
 import torch
 
-
-# helpers
-from sktorch.random import set_seed
-from sktorch._internal._util import _tag
+from sklearn.base import BaseEstimator
 
 from sktorch.modules.nn._util import _as_device
 
-# TODO: checkpoints? are they finished?
-# maybe continue after implementing `Trainer` (has optimizers, objectives, schedulers, models(backbone, adapter, head), etc)
-
-
-# Checkpoint Format
-@dataclass(frozen=True)
-class CheckpointSpec:   # TODO: 
-    """
-    Defines what we store in a checkpoint.
-
-    The key idea: you must be able to restore training *exactly*:
-    - model weights
-    - optimizer/scheduler/scaler state
-    - RNG states
-    - any counters (epoch/step)
-    - init params/hparams to reconstruct the object if needed
-    """
-    format_version: int = 1
-
-
-
-class SKTorchEstimatorBase(nn.Module, ABC):
+class SKTorchEstimatorBase(BaseEstimator, nn.Module, ABC):
 
     def __init__(
         self,
@@ -46,21 +21,19 @@ class SKTorchEstimatorBase(nn.Module, ABC):
         device: str | torch.device | None = None,
         dtype: torch.dtype = torch.float32,
     ):
-        super().__init__()
-        self.device = _as_device(device)
+        nn.Module.__init__(self)
+        BaseEstimator.__init__(self)
+
+        self.device = device              # raw (str|device|None)
+        self._device = _as_device(device) # resolved torch.device
         self.dtype = dtype
-        self.to(self.device)
+        self.to(self._device)
 
         self.is_fitted_: bool = False
         
 
     @abstractmethod
-    def forward(
-        self,
-        X: Tensor,
-        *,
-        kwargs: Dict[str, Any] = None,
-    ) -> Dict[str, Tensor | Any | None]:
+    def forward(self, X: Tensor, **kwargs: Any) -> Any:
         raise NotImplementedError
     
     @abstractmethod
@@ -77,115 +50,177 @@ class SKTorchEstimatorBase(nn.Module, ABC):
     
     # utilities
     def _to_tensor(self, X: np._ArrayLike) -> Tensor:
-        return torch.from_numpy(np.asarray(X)).to(device=self.device, dtype=self.dtype)
-    
-
-    # checkpointing
-
-    @classmethod
-    def _init_signature_params(cls) -> set[str]:
-        sig = inspect.signature(cls.__init__)
-        names: set[str] = set()
-
-        for name, param in sig.parameters.items():
-            if name == "self":
-                continue
-            if param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
-                continue
-            names.add(name)
-        return names
-
+        return torch.from_numpy(np.asarray(X)).to(device=self._device, dtype=self.dtype)
 
 
     def get_init_params(self) -> Dict[str, Any]:
-        """Return a dictionary of the init parameters (no training params/state) and their values."""
-
-        params: Dict[str, Any] = {}
-        for name in self._init_signature_params():
-            if not hasattr(self, name):
-                continue
-            v = getattr(self, name)
-
-            # normalize torch types to serializable types
-            if isinstance(v, torch.dtype):
-                params[name] = str(v).replace("torch.", "")
-            elif isinstance(v, torch.device):
-                params[name] = str(v)
-            else:
-                params[name] = v
-
-        return params
-    
-    # get_params and set_params are inherited from sklearn BaseEstimator
-
-
-    def export_meta(self) -> Dict[str, Any]:
-        """Export metadata about the model (not weights)."""
-        meta: Dict[str, Any] = {}
-
-        meta["is_fitted_"] = bool(self.is_fitted_)
-
-        if self.classes_ is not None:
-            meta["classes_"] = np.asarray(self.classes_)
-
-        return meta
-    
-    def load_meta(self, meta: Mapping[str, Any]) -> None:
         """
-        Restore metadata produced by export_meta().
+        Return constructor parameters for reconstruction (sklearn-compatible).
+
+        This is a thin wrapper over sklearn's get_params(deep=False).
         """
-        if "is_fitted_" in meta:
-            self.is_fitted_ = bool(meta["is_fitted_"])
-        if "classes_" in meta and meta["classes_"] is not None:
-            self.classes_ = np.asarray(meta["classes_"])
-    #
+        return dict(self.get_params(deep=False))
+    
+
+    def _fitted_state_keys(self) -> tuple[str, ...]:
+        """
+        Names of fitted attributes to persist across save/load.
+        Sklearn convention: fitted attributes end with '_'.
+        """
+        return ("is_fitted_",)
+    
+    # EXAMPLE: if a classifier has `classes_` after fitting, include that in the fitted state:
+    # def _fitted_state_keys(self):
+    #     return super()._fitted_state_keys() + ("classes_",)
+
+
+    def _get_fitted_state(self) -> Dict[str, Any]:
+        state: Dict[str, Any] = {}
+        for k in self._fitted_state_keys():
+            if hasattr(self, k):
+                state[k] = getattr(self, k)
+        return state
+
+
+    def _set_fitted_state(self, state: Mapping[str, Any]) -> None:
+        for k, v in state.items():
+            setattr(self, k, v)
+
+    # (de)serialization helpers
+    @classmethod
+    def _serialize_params(cls, obj: Any) -> Any:
+
+        # factories / custom serializables: *MUST* implement `to_dict()` for custom serialization, and `from_dict()` for deserialization
+        to_dict = getattr(obj, "to_dict", None)
+        if callable(to_dict):
+            d = to_dict()
+
+            if not isinstance(d, dict):
+                raise TypeError(f"{type(obj).__name__}.to_dict() must return a dict, got {type(d)}.")
+
+            if "__type__" not in d:
+                raise ValueError(f"{type(obj).__name__}.to_dict() must include '__type__' for deserialization.")
+
+            return {k: cls._serialize_params(v) for k, v in d.items()}
+
+        # containers
+        if isinstance(obj, dict):
+            return {k: cls._serialize_params(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [cls._serialize_params(v) for v in obj]
+
+        # torch types -> stable primitives
+        if isinstance(obj, torch.dtype):
+            return {"__type__": "torch.dtype", "value": str(obj).replace("torch.", "")}
+        if isinstance(obj, torch.device):
+            return {"__type__": "torch.device", "value": str(obj)}
+
+        return obj
+    
+    @classmethod
+    def _deserialize_params(cls, obj: Any) -> Any:
+
+        if isinstance(obj, dict):
+            
+            # torch special types
+            t = obj.get("__type__")
+            if t == "torch.dtype":
+                return getattr(torch, obj.get("value", "float32"), torch.float32)
+            if t == "torch.device":
+                return torch.device(obj["value"])
+
+            # factory types (discriminator preferred)
+            if "__type__" in obj:
+                typ = obj["__type__"]
+                dd = {k: cls._deserialize_params(v) for k, v in obj.items()}
+
+                if typ == "ModuleFactory":
+                    from sktorch.modules.nn.models.factory import ModuleFactory
+                    return ModuleFactory.from_dict(dd)
+
+                if typ == "AdapterFactory":
+                    from sktorch.modules.nn.FeatureAdapters import AdapterFactory
+                    return AdapterFactory.from_dict(dd)
+                
+                return dd  # unknown tagged dict
+
+            # plain dict
+            return {k: cls._deserialize_params(v) for k, v in obj.items()}
+
+        if isinstance(obj, list):
+            return [cls._deserialize_params(v) for v in obj]
+
+        return obj
+
+
     def estimator_state(self) -> Dict[str, Any]:
 
         return {
             "format" : {"name" : "sktorch-estimator", "version": 1},
             "class" : {"module": self.__class__.__module__, "name": self.__class__.__qualname__},
-            "init_params" : self.get_init_params(),
+            "init_params" : self._serialize_params(self.get_init_params()),
             "model_state_dict" : self.state_dict(),
-            "meta" : self.export_meta(),
+            "fitted_state": self._get_fitted_state(),
         }
     
-    def save(self, path: str) -> None:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+    def store_estimator(self, path: str) -> None:
+        d = os.path.dirname(path)
+        if d:
+            os.makedirs(d, exist_ok=True)
         torch.save(self.estimator_state(), path)
 
+    @staticmethod
     def _import_by_name(module: str, name: str) -> Any:
-        mod = __import__(module, fromlist=[name])
-        obj = getattr(mod, name)
+        mod = __import__(module, fromlist=["*"])
+        obj: Any = mod
+        for part in name.split("."):
+            obj = getattr(obj, part)
         if not isinstance(obj, type):
-            raise TypeError(f"Imported object {name} from module {module} is not a class.")
+            raise TypeError(f"Imported object {name} from module {module} is not a class, got {type(obj)}.")
         return obj
-    
+
     @classmethod
-    def load(cls,
-        path: str, 
-        *, 
-        map_location: str | torch.device | None = None, 
-        strict: bool = True
+    def load_estimator(
+        cls,
+        path: str,
+        *,
+        map_location: str | torch.device | None = None,
+        strict: bool = False,  # lazy loading => allow missing keys by default, but user can override with strict=True
     ) -> "SKTorchEstimatorBase":
-        
         ck: Dict[str, Any] = torch.load(path, map_location=map_location)
+
         fmt = ck.get("format", {})
         if fmt.get("name") != "sktorch-estimator":
             raise ValueError(f"Unrecognized estimator checkpoint format: {fmt}")
-        
+
         meta = ck["class"]
         class_obj = cls._import_by_name(meta["module"], meta["name"])
-        init_params = dict(ck.get("init_params", {}))
 
-        # dtype string -> torch.dtype
-        if "dtype" in init_params and isinstance(init_params["dtype"], str):
-            init_params["dtype"] = getattr(torch, init_params["dtype"], torch.float32)
-        
+        cls_obj_deserialize = getattr(class_obj, "_deserialize_params", None)
+        if not callable(cls_obj_deserialize):
+            raise TypeError(f"Loaded estimator class {class_obj.__module__}.{class_obj.__qualname__} must implement _deserialize_params() for checkpoint loading.")
+
+        # decode using the class we are about to instantiate
+        init_params = cls_obj_deserialize(ck.get("init_params", {}))
+        if not isinstance(init_params, dict):
+            raise TypeError(f"Checkpoint init_params must decode to dict, got {type(init_params)}.")
+
         model: SKTorchEstimatorBase = class_obj(**init_params)
         model.load_state_dict(ck["model_state_dict"], strict=strict)
 
-        m = ck.get("meta", {})
-        if isinstance(m, Mapping):
-            model.load_meta(m)
-        
+        fs = ck.get("fitted_state", {})
+        if isinstance(fs, Mapping):
+            model._set_fitted_state(fs)
+
         return model
+
+    # aliases
+    def save_estimator(self, path: str) -> None:
+        self.store_estimator(path)
+
+    def save(self, path: str) -> None:
+        self.store_estimator(path)
+
+    @classmethod
+    def load(cls, path: str, map_location: str | torch.device | None = None, strict: bool = False) -> "SKTorchEstimatorBase":
+        return cls.load_estimator(path, map_location=map_location, strict=strict)

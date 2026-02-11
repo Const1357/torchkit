@@ -8,23 +8,29 @@ Implemented Contextual Objectives:
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Iterable
 from collections.abc import Iterator
+from typing import Any, Iterable, Mapping
 
-from sktorch.modules.nn.objectives._base import LossOut, ContextualObjective
-import torch
 from torch import Tensor
+
+from sktorch.modules.nn.objectives._base import ContextualObjective, LossOut
 
 
 def _iter_tensors(obj: Any) -> Iterator[Tensor]:
     """
     Yield Tensors found inside `obj`.
 
-    Supported containers:
-    - Tensor
-    - nn.Parameter (is a Tensor)
-    - iterables (list/tuple/set/generator)
+    Supported containers
+    --------------------
+    - Tensor (including nn.Parameter)
     - mappings (dict-like)
+    - iterables (list/tuple/set/generator)
+    - generic iterables (e.g., model.parameters())
+
+    Notes
+    -----
+    Non-tensor values are ignored. This helper is intentionally permissive to
+    support nested parameter containers.
     """
     if obj is None:
         return
@@ -39,7 +45,6 @@ def _iter_tensors(obj: Any) -> Iterator[Tensor]:
         for v in obj:
             yield from _iter_tensors(v)
         return
-    # generic iterable (e.g. model.parameters())
     if isinstance(obj, Iterable) and not isinstance(obj, (str, bytes)):
         for v in obj:
             yield from _iter_tensors(v)
@@ -54,36 +59,33 @@ class L2Penalty(ContextualObjective):
     A contextual objective that computes an L2 penalty over a set of parameters
     provided via `context`. Predictions and targets are not required.
 
-    Typical use cases include weight decay, parameter norm penalties,
-    or constraint-based regularization.
-
     ### Call signature:
     ```
     obj(context, predictions=None, targets=None) -> LossOut
     ```
 
-    ### Parameters:
-    - **name** (`str`, default=`"l2_penalty"`):  
-      Human-readable identifier for the objective. Used for logging,
-      diagnostics, and composite objective naming.
+    Parameters
+    ----------
+    name : str, default="l2_penalty"
+        Objective name used for logging and diagnostics.
+    required : bool, default=True
+        If True, missing required inputs raise immediately.
+        If False, the objective may be skipped and replaced with a zero-loss
+        (only if a zero-loss can be constructed under the base-objective rules).
+    weight : float, default=1.0
+        Scalar weight applied by composite objectives.
+    key : str, default="params"
+        Context key that contains an iterable (or nested container) of tensors/parameters.
+    include_bias : bool, default=False
+        If False, parameters that look like biases (1D tensors) are excluded.
 
-    - **weight** (`float`, default=`1.0`):  
-      Scalar weight applied to this term when used inside a composite
-      objective.
+    Required keys
+    -------------
+    context:
+        - `key` (default: "params") must be present and non-None.
 
-    - **required** (`bool`, default=`True`):  
-      If `True`, missing required inputs raise immediately.  
-      If `False`, the objective may be skipped and replaced with a zero-loss
-      (only if a graph-connected zero-loss can be constructed).
-
-    - **include_bias** (`bool`, default=`False`):  
-      If `False`, parameters that look like biases (1D tensors) are excluded.
-
-    ### Required keys:
-    - **context** must contain:
-        - `"params"` — an iterable (or nested container) of tensors/parameters.
-
-    ### Example:
+    Example
+    -------
     ```python
     l2 = L2Penalty(weight=1e-4)
 
@@ -91,7 +93,7 @@ class L2Penalty(ContextualObjective):
         context={"params": model.parameters()},
     )
 
-    scalar_loss = out.loss
+    loss = out.loss
     ```
     """
 
@@ -101,17 +103,23 @@ class L2Penalty(ContextualObjective):
         required: bool = True,
         weight: float = 1.0,
         *,
+        key: str = "params",
         include_bias: bool = False,
     ):
+        if not isinstance(key, str) or not key:
+            raise ValueError(f"{self.__class__.__name__} key must be a non-empty string, got {key!r}.")
+
+        self._key = key
+        self._include_bias = bool(include_bias)
+
         super().__init__(
             name=name,
             required=required,
             weight=weight,
-            required_context_keys=("params",),
+            required_context_keys=(key,),
             required_pred_keys=(),
             required_target_keys=(),
         )
-        self._include_bias = bool(include_bias)
 
     def loss(
         self,
@@ -120,40 +128,38 @@ class L2Penalty(ContextualObjective):
         targets: Mapping[str, Tensor | None] | None = None,
     ) -> LossOut:
         """
-        Compute the L2 penalty over parameters provided in `context`.
+        Compute the L2 penalty over parameters provided in `context[key]`.
 
-        ### Inputs:
-        - **context["params"]**:  
-          Iterable (or nested container) of tensors/parameters to penalize.
-
-        ### Returns:
-        - `LossOut` containing a scalar L2 penalty loss.
+        Returns
+        -------
+        LossOut
+            Scalar L2 penalty loss and diagnostics in details.
         """
-        params_obj = context["params"]
+        params_obj = context[self._key]
 
         total_sq: Tensor | None = None
-        n_params: int = 0
+        n_tensors: int = 0
 
         for p in _iter_tensors(params_obj):
             # optionally skip "bias-like" parameters (common convention)
             if (not self._include_bias) and p.ndim == 1:
                 continue
 
-            # sum of squares
             s = (p * p).sum()
             total_sq = s if total_sq is None else (total_sq + s)
-            n_params += 1
+            n_tensors += 1
 
         if total_sq is None:
             raise ValueError(
-                f"{self.__class__.__name__} expected at least one parameter tensor in context['params'], "
+                f"{self.__class__.__name__} expected at least one parameter tensor in context[{self._key!r}], "
                 f"but found none (after filtering)."
             )
 
         return LossOut(
             loss=total_sq,
             details={
-                "num_tensors": n_params,
+                "num_tensors": n_tensors,
                 "include_bias": self._include_bias,
+                "key": self._key,
             },
         )

@@ -7,11 +7,14 @@ Implemented Relational Objectives:
  + More to come...
 """
 
-from sktorch.modules.nn.objectives._base import LossOut, RelationalObjective
+from __future__ import annotations
+
+from typing import Any, Mapping
+
 import torch.nn.functional as F
 from torch import Tensor
 
-from typing import Mapping
+from sktorch.modules.nn.objectives._base import LossOut, RelationalObjective
 
 
 class CrossEntropyLoss(RelationalObjective):
@@ -21,91 +24,105 @@ class CrossEntropyLoss(RelationalObjective):
     A relational objective that computes the cross-entropy loss between
     predicted logits and target class labels.
 
-    This objective compares model outputs directly against ground-truth
-    targets and is typically used for multi-class classification tasks.
-
     ### Call signature:
     ```
     obj(predictions, targets, context=None) -> LossOut
     ```
 
-    ### Parameters:
-    - **name** (`str`, default=`"cross_entropy_loss"`):
-      Human-readable identifier for the objective. Used for logging,
-      diagnostics, and composite objective naming.
+    Parameters
+    ----------
+    task : str, default="clf"
+        Task identifier used to namespace prediction and target keys.
+        Required keys are constructed as:
+            - predictions[f"{task}/logits"]
+            - targets[f"{task}/targets"]
 
-    - **weight** (`float`, default=`1.0`):
-      Scalar weight applied to this loss when used inside a composite objective.
+    name : str, default="cross_entropy_loss"
+        Objective name used for logging and diagnostics.
 
-    - **required** (`bool`, default=`True`):
-      If `True`, missing required inputs raise immediately.
-      If `False`, the objective may be skipped and replaced with a zero-loss
-      (only if a graph-connected zero-loss can be constructed).
+    required : bool, default=True
+        If True, missing required inputs raise immediately.
+        If False, the objective may be skipped and replaced with a zero-loss
+        (only if a zero-loss can be constructed under the base-objective rules).
 
-    - **reduction** (`str`, default=`"mean"`):
-      Specifies the reduction to apply to the output:
-        - `"mean"`: average loss over the batch (recommended)
-        - `"sum"`: sum loss over the batch
+    weight : float, default=1.0
+        Scalar weight applied by composite objectives.
 
-      Note: `"none"` is not supported here because this framework requires
-      objectives to return a scalar loss tensor.
+    reduction : {"mean", "sum"}, default="mean"
+        Reduction applied to the per-sample cross-entropy loss.
 
-    ### Required keys:
-    - **predictions** must contain:
-        - `"clf/logits"` — raw, unnormalized class logits.
-    - **targets** must contain:
-        - `"clf/targets"` — integer class labels.
+        Note: "none" is intentionally not supported. By convention, objectives
+        in this framework return a scalar loss tensor. Unreduced diagnostics
+        should be returned via LossOut.details.
 
-    ### Example:
+    Required keys
+    -------------
+    predictions:
+        - f"{task}/logits": raw, unnormalized logits of shape (N, C)
+    targets:
+        - f"{task}/targets": integer class labels of shape (N,)
+
+    Example
+    -------
     ```python
-    ce_loss = CrossEntropyLoss(reduction="mean")
+    ce = CrossEntropyLoss(task="clf", reduction="mean")
 
-    out = ce_loss(
+    out = ce(
         predictions={"clf/logits": logits},
         targets={"clf/targets": labels},
     )
 
-    scalar_loss = out.loss
+    loss = out.loss
     ```
     """
 
     def __init__(
         self,
+        *,
+        task: str = "clf",
         name: str = "cross_entropy_loss",
         required: bool = True,
         weight: float = 1.0,
-        *,
         reduction: str = "mean",
     ):
+        if not isinstance(task, str) or not task:
+            raise ValueError(f"{self.__class__.__name__} task must be a non-empty string, got {task!r}.")
         if reduction not in ("mean", "sum"):
             raise ValueError(
                 f"{self.__class__.__name__} reduction must be one of ('mean','sum'), got {reduction!r}."
             )
 
+        self._task = task
+        self._reduction = reduction
+
         super().__init__(
             name=name,
             required=required,
             weight=weight,
-            required_pred_keys=("clf/logits",),
-            required_target_keys=("clf/targets",),
+            required_pred_keys=(f"{task}/logits",),
+            required_target_keys=(f"{task}/targets",),
         )
-        self._reduction = reduction
 
-    def loss(self, predictions: Mapping[str, Tensor], targets: Mapping[str, Tensor]) -> LossOut:
+    def loss(
+        self,
+        predictions: Mapping[str, Tensor | None],
+        targets: Mapping[str, Tensor | None],
+        context: Mapping[str, Any] | None = None,
+    ) -> LossOut:
         """
         Compute the cross-entropy loss.
 
-        ### Inputs:
-        - **predictions["clf/logits"]** (`Tensor`):
-          Logits of shape `(N, C)` where `C` is the number of classes.
-        - **targets["clf/targets"]** (`Tensor`):
-          Integer class labels of shape `(N,)`.
-
-        ### Returns:
-        - `LossOut` containing a scalar loss tensor (per `reduction`).
+        Returns
+        -------
+        LossOut
+            Scalar loss tensor according to the configured reduction.
         """
-        logits = predictions["clf/logits"]
-        labels = targets["clf/targets"]
+        logits = predictions[f"{self._task}/logits"]
+        labels = targets[f"{self._task}/targets"]
+
+        # Base-objective contract guarantees required keys are present and non-None
+        assert isinstance(logits, Tensor)
+        assert isinstance(labels, Tensor)
 
         loss = F.cross_entropy(logits, labels, reduction=self._reduction)
         return LossOut(loss=loss, details={"reduction": self._reduction})
@@ -115,93 +132,108 @@ class MSELoss(RelationalObjective):
     """
     Mean squared error regression loss.
 
-    A relational objective that computes the mean squared error (MSE)
-    between predicted values and regression targets.
-
-    This objective is commonly used for regression tasks where model outputs
-    are expected to approximate continuous target values.
+    A relational objective that computes the mean squared error (MSE) between
+    predicted values and regression targets.
 
     ### Call signature:
     ```
     obj(predictions, targets, context=None) -> LossOut
     ```
 
-    ### Parameters:
-    - **name** (`str`, default=`"mse_loss"`):
-      Human-readable identifier for the objective.
+    Parameters
+    ----------
+    task : str, default="reg"
+        Task identifier used to namespace prediction and target keys.
+        Required keys are constructed as:
+            - predictions[f"{task}/pred"]
+            - targets[f"{task}/target"]
 
-    - **weight** (`float`, default=`1.0`):
-      Scalar weight applied to this loss when used inside a composite objective.
+    name : str, default="mse_loss"
+        Objective name used for logging and diagnostics.
 
-    - **required** (`bool`, default=`True`):
-      If `True`, missing required inputs raise immediately.
-      If `False`, the objective may be skipped and replaced with a zero-loss
-      (only if a graph-connected zero-loss can be constructed).
+    required : bool, default=True
+        If True, missing required inputs raise immediately.
+        If False, the objective may be skipped and replaced with a zero-loss
+        (only if a zero-loss can be constructed under the base-objective rules).
 
-    - **reduction** (`str`, default=`"mean"`):
-      Specifies the reduction to apply to the output:
-        - `"mean"`: average loss over the batch (recommended)
-        - `"sum"`: sum loss over the batch
+    weight : float, default=1.0
+        Scalar weight applied by composite objectives.
 
-      Note: `"none"` is not supported here because this framework requires
-      objectives to return a scalar loss tensor.
+    reduction : {"mean", "sum"}, default="mean"
+        Reduction applied to the per-element squared error.
 
-    ### Required keys:
-    - **predictions** must contain:
-        - `"reg/pred"` — predicted regression outputs.
-    - **targets** must contain:
-        - `"reg/target"` — ground-truth regression targets.
+        Note: "none" is intentionally not supported. By convention, objectives
+        in this framework return a scalar loss tensor. Unreduced diagnostics
+        should be returned via LossOut.details.
 
-    ### Example:
+    Required keys
+    -------------
+    predictions:
+        - f"{task}/pred": predicted values of shape (N, ...)
+    targets:
+        - f"{task}/target": target values of matching shape
+
+    Example
+    -------
     ```python
-    mse_loss = MSELoss(reduction="mean")
+    mse = MSELoss(task="reg", reduction="mean")
 
-    out = mse_loss(
+    out = mse(
         predictions={"reg/pred": preds},
-        targets={"reg/target": targets},
+        targets={"reg/target": tgts},
     )
 
-    scalar_loss = out.loss
+    loss = out.loss
     ```
     """
 
     def __init__(
         self,
+        *,
+        task: str = "reg",
         name: str = "mse_loss",
         required: bool = True,
         weight: float = 1.0,
-        *,
         reduction: str = "mean",
     ):
+        if not isinstance(task, str) or not task:
+            raise ValueError(f"{self.__class__.__name__} task must be a non-empty string, got {task!r}.")
         if reduction not in ("mean", "sum"):
             raise ValueError(
                 f"{self.__class__.__name__} reduction must be one of ('mean','sum'), got {reduction!r}."
             )
 
+        self._task = task
+        self._reduction = reduction
+
         super().__init__(
             name=name,
             required=required,
             weight=weight,
-            required_pred_keys=("reg/pred",),
-            required_target_keys=("reg/target",),
+            required_pred_keys=(f"{task}/pred",),
+            required_target_keys=(f"{task}/target",),
         )
-        self._reduction = reduction
 
-    def loss(self, predictions, targets):
+    def loss(
+        self,
+        predictions: Mapping[str, Tensor | None],
+        targets: Mapping[str, Tensor | None],
+        context: Mapping[str, Any] | None = None,
+    ) -> LossOut:
         """
         Compute the mean squared error loss.
 
-        ### Inputs:
-        - **predictions["reg/pred"]** (`Tensor`):
-          Predicted values of shape `(N, ...)`.
-        - **targets["reg/target"]** (`Tensor`):
-          Target values of matching shape.
-
-        ### Returns:
-        - `LossOut` containing a scalar loss tensor (per `reduction`).
+        Returns
+        -------
+        LossOut
+            Scalar loss tensor according to the configured reduction.
         """
-        preds = predictions["reg/pred"]
-        tgts = targets["reg/target"]
+        preds = predictions[f"{self._task}/pred"]
+        tgts = targets[f"{self._task}/target"]
+
+        # Base-objective contract guarantees required keys are present and non-None
+        assert isinstance(preds, Tensor)
+        assert isinstance(tgts, Tensor)
 
         loss = F.mse_loss(preds, tgts, reduction=self._reduction)
         return LossOut(loss=loss, details={"reduction": self._reduction})
