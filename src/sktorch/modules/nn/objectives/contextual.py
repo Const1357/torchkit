@@ -1,12 +1,12 @@
 # some Contextual Objectives (evaluated primarily on context)
 
+from __future__ import annotations
 """
 Implemented Contextual Objectives:
  + L2Penalty
  + More to come...
 """
 
-from __future__ import annotations
 
 from collections.abc import Iterator
 from typing import Any, Iterable, Mapping

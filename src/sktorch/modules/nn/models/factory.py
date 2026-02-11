@@ -28,6 +28,16 @@ class ModuleFactory:
     
     def build(self, **runtime_build_args:Any) -> nn.Module:
         cls = _import_from_path(self.cls_path)
+
+        # Explicit duplicate-key guard (disallow runtime overrides to guarantee checkpoint stability)
+        duplicate_keys = set(self.kwargs).intersection(runtime_build_args)
+        if duplicate_keys:
+            dup_sorted = sorted(duplicate_keys)
+            raise TypeError(
+                f"Factory {self.cls_path}: Runtime build arguments attempt to override "
+                f"stored kwargs {dup_sorted}. Overrides are not allowed."
+            )
+    
         module = cls(**self.kwargs, **runtime_build_args)
         if not isinstance(module, nn.Module):
             raise TypeError(f"Factory {self.cls_path}: Built object is not a torch.nn.Module, got {type(module)}.")

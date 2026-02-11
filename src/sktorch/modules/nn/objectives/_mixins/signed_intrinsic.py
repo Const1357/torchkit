@@ -1,7 +1,6 @@
-import torch    # for Tensor operations
+from __future__ import annotations
 from typing import Literal
 
-from __future__ import annotations
 
 from typing import Literal, Any, Dict
 from torch import Tensor

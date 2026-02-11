@@ -1,4 +1,5 @@
 # some Relational Objectives (evaluated on prediction-target)
+from __future__ import annotations
 
 """
 Implemented Relational Objectives:
@@ -7,7 +8,6 @@ Implemented Relational Objectives:
  + More to come...
 """
 
-from __future__ import annotations
 
 from typing import Any, Mapping
 

@@ -1,4 +1,5 @@
 # some Intrinsic Objectives (evaluated on predictions only)
+from __future__ import annotations
 
 """
 Implemented Intrinsic Objectives:
@@ -6,7 +7,6 @@ Implemented Intrinsic Objectives:
  + More to come...
 """
 
-from __future__ import annotations
 
 from typing import Any, Literal, Mapping
 

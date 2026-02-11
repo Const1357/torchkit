@@ -173,22 +173,6 @@ def _adaptive_max_pool(features: Tensor, target: Sequence[int]) -> Tensor:
     raise ValueError(f"Adaptive pooling not implemented for nd={nd}. For nd>3, use GAP/GeM/Attn, or downsample in backbone.")
 
 
-
-def _spp_forward(self: SPPAdapter, features: Tensor) -> Tensor:
-    dims = _spatial_dims(features)
-    nd = len(dims)
-
-    outs = []
-    for b in self.bins:
-        target = [b] * nd
-        pooled = _adaptive_avg_pool(features, target) if self.mode == "avg" else _adaptive_max_pool(features, target)
-        outs.append(pooled.reshape(features.size(0), -1))
-
-    return torch.cat(outs, dim=1)
-SPPAdapter.forward = _spp_forward  # type: ignore[method-assign]
-
-
-
 class IdentityAdapter(_BaseAdapter):
 
     @override
@@ -406,9 +390,9 @@ class SPPAdapter(_BaseAdapter):
         for b in self.bins:
             target = [b] * nd
             if self.mode == "avg":
-                pooled = torch.nn.functional.adaptive_avg_pool_nd(features, target)  # type: ignore[attr-defined]
+                pooled = _adaptive_avg_pool(features, target)
             else:
-                pooled = torch.nn.functional.adaptive_max_pool_nd(features, target)  # type: ignore[attr-defined]
+                pooled = _adaptive_max_pool(features, target)
             outs.append(pooled.reshape(features.size(0), -1))
 
         return torch.cat(outs, dim=1)

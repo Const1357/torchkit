@@ -57,6 +57,23 @@ class SKTorchEstimatorBase(BaseEstimator, nn.Module, ABC):
     + Optionally implement `fit(...)` (or rely on `SKTorchTrainer`).
     + Extend `_fitted_state_keys()` if additional fitted attributes
       must persist across save/load.
+
+    ---
+
+    ### IMPORTANT — sklearn compatibility requirement
+
+    **Subclasses MUST declare all constructor parameters explicitly in `__init__` and MUST NOT use `**kwargs` as a catch-all.**
+
+    Example:
+
+    ```python
+    # Correct: (explicit parameters — sklearn compatible)
+    def __init__(self, *, device=None, dtype=torch.float32, hidden_dim=128):
+        ...
+    # Incorrect: (catch-all **kwargs — NOT sklearn compatible)
+    def __init__(self, **kwargs):
+        ...
+    ```
     """
 
     def __init__(
@@ -80,7 +97,8 @@ class SKTorchEstimatorBase(BaseEstimator, nn.Module, ABC):
     def forward(self, X: Tensor, **kwargs: Any) -> Any:
         raise NotImplementedError
     
-    @abstractmethod
+    # @abstractmethod   # removed the decorator to allow instantiation of interface classes that rely on SKTorchTrainer for fitting.
+    # estimators remain pure inference machines, and training is handled by SKTorchTrainer.
     def fit(self, X: Any, y: Any = None, **kwargs: Any) -> "SKTorchEstimatorBase":
         """
         Base class does not implement training.
@@ -99,11 +117,39 @@ class SKTorchEstimatorBase(BaseEstimator, nn.Module, ABC):
 
     def get_init_params(self) -> Dict[str, Any]:
         """
-        Return constructor parameters for reconstruction (sklearn-compatible).
+        Return constructor parameters for reconstruction (checkpoint-safe).
 
-        This is a thin wrapper over sklearn's get_params(deep=False).
+        We intentionally do NOT rely on sklearn's get_params(), because sklearn's
+        parameter introspection can miss params in some multiple-inheritance /
+        ABC setups, and we want checkpoints to be deterministic.
+
+        Policy:
+        - Read the most-derived __init__ signature (self.__class__.__init__).
+        - Collect all explicitly declared parameters (excluding *args/**kwargs).
+        - Fetch each value from the instance attribute of the same name.
         """
-        return dict(self.get_params(deep=False))
+        import inspect
+
+        sig = inspect.signature(self.__class__.__init__)
+        out: Dict[str, Any] = {}
+
+        for name, p in sig.parameters.items():
+            if name == "self":
+                continue
+            if p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+                # ignore *args/**kwargs
+                continue
+
+            if not hasattr(self, name):
+                raise AttributeError(
+                    f"{self.__class__.__name__}.get_init_params(): "
+                    f"__init__ declares parameter '{name}', but the instance has no attribute '{name}'. "
+                    f"Store sklearn params as attributes with the same name (e.g., self.{name} = {name})."
+                )
+
+            out[name] = getattr(self, name)
+
+        return out
     
 
     def _fitted_state_keys(self) -> tuple[str, ...]:
@@ -231,7 +277,7 @@ class SKTorchEstimatorBase(BaseEstimator, nn.Module, ABC):
         map_location: str | torch.device | None = None,
         strict: bool = False,  # lazy loading => allow missing keys by default, but user can override with strict=True
     ) -> "SKTorchEstimatorBase":
-        ck: Dict[str, Any] = torch.load(path, map_location=map_location)
+        ck: Dict[str, Any] = torch.load(path, map_location=map_location, weights_only=False)
 
         fmt = ck.get("format", {})
         if fmt.get("name") != "sktorch-estimator":
