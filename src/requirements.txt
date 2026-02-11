@@ -1,0 +1,5 @@
+numpy==2.4.2
+optuna==4.7.0
+scikit_learn==1.8.0
+torch==2.10.0+cu130
+typing_extensions==4.15.0

@@ -3,9 +3,17 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sktorch"          # pip distribution name
+name = "sktorch"
 version = "0.1.0"
 requires-python = ">=3.10"
+
+# Add runtime deps that your package imports at import-time.
+dependencies = [
+  "numpy",
+  "scikit-learn",
+  "torch",
+  "typing-extensions; python_version < '3.11'",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -14,4 +22,6 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [project.optional-dependencies]
+optuna = ["optuna"] # will implement OptunaSearchCV later
+test = ["pytest"]
 dev = ["pytest", "ruff", "build", "twine"]
