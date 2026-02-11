@@ -95,7 +95,13 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 import math
-from typing import Dict, Sequence, override, Type, Any
+from typing import Dict, Sequence, Type, Any\
+
+try:
+    from typing import override  # py3.12+
+except ImportError:
+    from typing_extensions import override  # py<=3.11
+
 from torch import (Tensor, nn)
 import torch
 

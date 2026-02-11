@@ -1,6 +1,13 @@
 from abc import ABC
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Any, override
+from typing import Dict, Optional, Any
+
+try:
+    from typing import override  # py3.12+
+except ImportError:
+    from typing_extensions import override  # py<=3.11
+
+    
 from torch import nn, Tensor
 import torch
 
