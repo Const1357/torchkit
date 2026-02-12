@@ -315,14 +315,90 @@ def test_backbone_without_gating_does_not_receive_requested_features_kwarg():
 # Tests: routing / missing features / type checks
 # -----------------------
 
-def test_backbone_features_must_be_dict():
-    bb = ModuleFactory.from_type(DummyBackboneBadFeaturesNotDict)
-    heads = {"t1": ModuleFactory.from_type(DummyHead, out_dim=2, tag="t1")}
-    bfft = {"t1": "f1"}
-    m = _make_mt(backbone_factory=bb, head_factories=heads, backbone_feature_for_task=bfft)
+class DummyBackboneTensor(nn.Module):
+    def forward(self, x: Tensor, **kwargs: Any) -> Any:
+        return type("BackboneOut", (), {"features": x, "details": {"bb": "tensor"}})()
+
+
+class DummyBackboneDict(nn.Module):
+    def forward(self, x: Tensor, **kwargs: Any) -> Any:
+        feats = {"fa": x, "fb": x * 0.0 + 1.0}  # two distinct tensors
+        return type("BackboneOut", (), {"features": feats, "details": {"bb": "dict"}})()
+
+
+class DummyBackboneBadFeatures(nn.Module):
+    def forward(self, x: Tensor, **kwargs: Any) -> Any:
+        return type("BackboneOut", (), {"features": ["nope"], "details": {}})()
+
+
+# --- tests ---
+
+def test_backbone_features_tensor_broadcasts_to_multiple_heads_and_respects_active_tasks():
+    bb = ModuleFactory.from_type(DummyBackboneTensor)
+
+    heads = {
+        "A": ModuleFactory.from_type(DummyHead, out_dim=2, tag="A"),
+        "B": ModuleFactory.from_type(DummyHead, out_dim=2, tag="B"),
+    }
+    # mapping is irrelevant for tensor-backbones, but still required by constructor
+    bfft = {"A": "fa", "B": "fb"}
+
+    m = _make_mt(
+        backbone_factory=bb,
+        head_factories=heads,
+        backbone_feature_for_task=bfft,
+        adapter_factories=_identity_adapter_factories(["A", "B"]),
+    )
+
     x = torch.randn(2, 3)
 
-    with pytest.raises(TypeError, match="features to be a dict"):
+    # tensor backbone broadcasts: both heads run when active_tasks=None
+    out_all = m(x)
+    assert list(out_all.heads_out.keys()) == ["A", "B"]
+
+    # respects active_tasks: only B runs
+    out_b = m(x, active_tasks=["B"])
+    assert list(out_b.heads_out.keys()) == ["B"]
+
+
+def test_backbone_features_dict_routes_by_backbone_feature_for_task_keys():
+    bb = ModuleFactory.from_type(DummyBackboneDict)
+
+    heads = {
+        "A": ModuleFactory.from_type(DummyHead, out_dim=2, tag="A"),
+        "B": ModuleFactory.from_type(DummyHead, out_dim=2, tag="B"),
+    }
+    bfft = {"A": "fa", "B": "fb"}
+
+    m = _make_mt(
+        backbone_factory=bb,
+        head_factories=heads,
+        backbone_feature_for_task=bfft,
+        adapter_factories=_identity_adapter_factories(["A", "B"]),
+    )
+
+    x = torch.randn(2, 3)
+    out = m(x, active_tasks=["A", "B"])
+
+    assert list(out.heads_out.keys()) == ["A", "B"]
+    assert "A" in out.heads_out and "B" in out.heads_out
+
+
+def test_backbone_features_neither_tensor_nor_dict_raises_typeerror():
+    bb = ModuleFactory.from_type(DummyBackboneBadFeatures)
+
+    heads = {"t1": ModuleFactory.from_type(DummyHead, out_dim=2, tag="t1")}
+    bfft = {"t1": "f1"}
+
+    m = _make_mt(
+        backbone_factory=bb,
+        head_factories=heads,
+        backbone_feature_for_task=bfft,
+        adapter_factories=_identity_adapter_factories(["t1"]),
+    )
+
+    x = torch.randn(2, 3)
+    with pytest.raises(TypeError, match=r"features must be either a Tensor.*or a dict"):
         _ = m(x)
 
 

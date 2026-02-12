@@ -44,9 +44,9 @@ class SKTorchMultitasker(SKTorchEstimatorBase, ABC):
     + Must be an `nn.Module`
     + Forward must return `BackboneOut`
       containing:
-        - `features: dict[str, Tensor | None]`
+        - `features: Tensor | dict[str, Tensor]`
         - `details: Dict[str, Any]`
-    + `features` MUST be a dict (routing relies on string keys).
+    + `features` must either be a `Tensor` or a `dict[str, Tensor]`. In the `Tensor` case, the same features are broadcast to all active tasks. In the `dict` case, features are routed to tasks based on `backbone_feature_for_task`.
       Missing keys or keys with value None are treated as "not computed".
     + Each routed feature tensor must be at least 2D:
         [BatchDimension, ...]
@@ -410,11 +410,6 @@ class SKTorchMultitasker(SKTorchEstimatorBase, ABC):
         bb_out: BackboneOut = self.backbone(X, **bb_kwargs)
 
         feats = bb_out.features
-        if not isinstance(feats, dict):
-            raise TypeError(
-                "Multitasker requires BackboneOut.features to be a dict[str, Tensor] (optionally omitting keys). "
-                f"Got {type(feats)}."
-            )
 
         # fast-forward routing cache (task order + corresponding feature keys)
         cached = self._fast_cache.get(tasks_key)
@@ -425,44 +420,79 @@ class SKTorchMultitasker(SKTorchEstimatorBase, ABC):
         else:
             task_order, feature_keys = cached
 
-        # route backbone features -> per-task adapter -> per-task head input
         per_task_head_input: Dict[str, Tensor] = {}
-        for task_name, feature_key in zip(task_order, feature_keys):
-            # We accept BOTH:
-            # - missing key (preferred when feature not computed)
-            # - present but None (also treated as "not computed")
-            if feature_key not in feats or feats[feature_key] is None:
-                raise KeyError(
-                    f"Backbone did not provide feature '{feature_key}' required for active task '{task_name}'. "
-                    f"Requested features: {sorted(requested_keys)}. Available: {list(feats.keys())}"
-                )
 
-            x = feats[feature_key]
-            if not isinstance(x, torch.Tensor):
-                raise TypeError(
-                    f"Backbone feature '{feature_key}' for task '{task_name}' must be a Tensor, got {type(x)}."
-                )
+        # -----------------------------
+        # Case 1: single-tensor backbone
+        # -----------------------------
+        if isinstance(feats, torch.Tensor):
+            x = feats
             if x.ndim < 2:
                 raise ValueError(
-                    f"Backbone feature '{feature_key}' for task '{task_name}' must be at least 2D "
-                    f"[BatchDimension, ...], got {tuple(x.shape)}."
+                    f"Backbone output tensor must be at least 2D [BatchDimension, ...], got {tuple(x.shape)}."
                 )
 
-            self._ensure_adapter_for_task(task_name)
-            adapter = self.feature_adapters[task_name]
+            for task_name in task_order:
+                self._ensure_adapter_for_task(task_name)
+                adapter = self.feature_adapters[task_name]
 
-            a_kwargs = adapter_fwd_args.get(task_name, {})
-            head_in = adapter(x, **a_kwargs)
+                a_kwargs = adapter_fwd_args.get(task_name, {})
+                head_in = adapter(x, **a_kwargs)
 
-            if not isinstance(head_in, torch.Tensor):
-                raise TypeError(f"Adapter output for task '{task_name}' must be a Tensor, got {type(head_in)}.")
-            if head_in.ndim < 2:
-                raise ValueError(
-                    f"Head input for task '{task_name}' must be at least 2D [BatchDimension, ...], "
-                    f"got {tuple(head_in.shape)}. Check your adapter."
-                )
+                if not isinstance(head_in, torch.Tensor):
+                    raise TypeError(f"Adapter output for task '{task_name}' must be a Tensor, got {type(head_in)}.")
+                if head_in.ndim < 2:
+                    raise ValueError(
+                        f"Head input for task '{task_name}' must be at least 2D [BatchDimension, ...], "
+                        f"got {tuple(head_in.shape)}. Check your adapter."
+                    )
 
-            per_task_head_input[task_name] = head_in
+                per_task_head_input[task_name] = head_in
+
+        # -----------------------------
+        # Case 2: dict backbone (routing)
+        # -----------------------------
+        elif isinstance(feats, dict):
+            for task_name, feature_key in zip(task_order, feature_keys):
+                if feature_key not in feats or feats[feature_key] is None:
+                    raise KeyError(
+                        f"Backbone did not provide feature '{feature_key}' required for active task '{task_name}'. "
+                        f"Requested features: {sorted(requested_keys)}. Available: {list(feats.keys())}"
+                    )
+
+                x = feats[feature_key]
+                if not isinstance(x, torch.Tensor):
+                    raise TypeError(
+                        f"Backbone feature '{feature_key}' for task '{task_name}' must be a Tensor, got {type(x)}."
+                    )
+                if x.ndim < 2:
+                    raise ValueError(
+                        f"Backbone feature '{feature_key}' for task '{task_name}' must be at least 2D "
+                        f"[BatchDimension, ...], got {tuple(x.shape)}."
+                    )
+
+                self._ensure_adapter_for_task(task_name)
+                adapter = self.feature_adapters[task_name]
+
+                a_kwargs = adapter_fwd_args.get(task_name, {})
+                head_in = adapter(x, **a_kwargs)
+
+                if not isinstance(head_in, torch.Tensor):
+                    raise TypeError(f"Adapter output for task '{task_name}' must be a Tensor, got {type(head_in)}.")
+                if head_in.ndim < 2:
+                    raise ValueError(
+                        f"Head input for task '{task_name}' must be at least 2D [BatchDimension, ...], "
+                        f"got {tuple(head_in.shape)}. Check your adapter."
+                    )
+
+                per_task_head_input[task_name] = head_in
+
+        else:
+            raise TypeError(
+                "BackboneOut.features must be either a Tensor (single-output backbone) "
+                "or a dict[str, Tensor] (multi-output backbone). "
+                f"Got {type(feats)}."
+            )
 
         # lazy heads init per task (needs per-task dummy inputs)
         for task_name in task_order:
