@@ -4,6 +4,7 @@ from typing import Any, Collection, Literal, Optional, ValuesView, ItemsView, Ke
 from torch import nn, Tensor
 
 from torchkit.models.backbone._backbone import Backbone
+from torchkit.models.calibrator._calibrator import Calibrator
 from torchkit.models.task_head._task_head import TaskHead
 
 
@@ -17,6 +18,20 @@ class _TaskHeadModuleDict(nn.ModuleDict):
         return super().items()
 
     def values(self) -> ValuesView[TaskHead]:  # type: ignore[override]
+        return super().values()
+
+    def keys(self) -> KeysView[str]:  # type: ignore[override]
+        return super().keys()
+    
+
+class _CalibratorModuleDict(nn.ModuleDict):
+    def __getitem__(self, key: str) -> Calibrator:  # type: ignore[override]
+        return super().__getitem__(key)  # runtime returns the module
+
+    def items(self) -> ItemsView[str, Calibrator]:  # type: ignore[override]
+        return super().items()
+
+    def values(self) -> ValuesView[Calibrator]:  # type: ignore[override]
         return super().values()
 
     def keys(self) -> KeysView[str]:  # type: ignore[override]
@@ -39,15 +54,17 @@ class TorchkitModel(nn.Module):
     def __init__(
         self,
         backbone: Backbone,
-        heads: dict[str, TaskHead]
+        heads: dict[str, TaskHead],
+        calibrators: Optional[dict[str, Calibrator]] = None,
     ):
+        """calibrators are attached to heads by name.
+        If a calibrator is attached to a head, then the head MUST return a "logits" output."""
         super().__init__()
 
         if backbone is None:
             raise ValueError("`backbone` must be provided and non-None.")
         if heads is None:
             raise ValueError("`heads` must be provided and non-None.")
-
 
         # backbone
         if not isinstance(backbone, Backbone):
@@ -71,6 +88,21 @@ class TorchkitModel(nn.Module):
             validated_heads[name] = head
 
         self.heads = _TaskHeadModuleDict(validated_heads)
+
+        # calibrators
+        if calibrators is None:
+            calibrators = {}
+        if not isinstance(calibrators, dict):
+            raise TypeError(f"`calibrators` must be a dict mapping str to Calibrator, got {type(calibrators)}.")
+        for name, calibrator in calibrators.items():
+            if not isinstance(name, str):
+                raise TypeError(f"`calibrators` keys must be str, got {type(name)}: {name!r}.")
+            if not isinstance(calibrator, Calibrator):
+                raise TypeError(f"`calibrators` values must be instances of Calibrator, got {type(calibrator)} for key {name!r}.")
+            if name not in heads.keys():
+                raise ValueError(f"Calibrator {name!r} does not have a corresponding head in `heads`: {set(heads.keys())}. Each calibrator must correspond to a head by name.")
+
+        self.calibrators = _CalibratorModuleDict(calibrators)
 
     # Note: we do not cache these properties to avoid state/sync bugs.
     # Recomputing cost is negligible due to the small number of heads, and we can optimize later if needed.
@@ -102,6 +134,16 @@ class TorchkitModel(nn.Module):
             if head.is_active:
                 features.update(head.required_features)
         return features
+    
+    @property
+    def calibrator_names(self) -> set[str]:
+        """Returns the set of all calibrator names."""
+        return set(self.calibrators.keys())
+    
+    @property
+    def active_calibrator_names(self) -> set[str]:
+        """Returns the names of calibrators for active heads."""
+        return set(name for name in self.calibrators.keys() if self.heads[name].is_active)
     
     # API helpers for enabling/disabling heads by name, and freezing/unfreezing backbone and heads by name ---
     def enable_head(self, head_name: str | list[str]) -> "TorchkitModel":
@@ -244,6 +286,10 @@ class TorchkitModel(nn.Module):
             head = self.heads[head_name]
             current_head_kwargs = head_kwargs.get(head_name, {})
             head_out = head(bb_out, payload=payload, head_module_kwargs=current_head_kwargs)
+
+            if head_name in self.calibrators:
+                if "logits" not in head_out:
+                    raise KeyError(f"Head {head_name!r} has a calibrator but did not return 'logits' in its output. Calibrators require their head to return 'logits'.")
             
             out[head_name] = head_out
 

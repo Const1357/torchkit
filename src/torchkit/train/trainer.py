@@ -5,7 +5,7 @@ from typing import Any, Optional, Literal
 import copy
 
 import torch
-from torch import nn, Tensor
+from torch import Tensor
 
 import optuna
 
@@ -27,6 +27,9 @@ def _move_to_device(x: Any, device: torch.device | str) -> Any:
         return type(x)(t) if isinstance(x, tuple) else t
     return x
 
+def _scheduler_expects_metric(sched: object) -> bool:
+    return isinstance(sched, torch.optim.lr_scheduler.ReduceLROnPlateau)
+
 
 @dataclass(frozen=False)
 class TrainerConfig:
@@ -43,7 +46,7 @@ class TrainerConfig:
     optimizer_cls: type[torch.optim.Optimizer] = torch.optim.AdamW
     optimizer_kwargs: dict[str, Any] = field(default_factory=lambda: {"lr": 1e-3})
 
-    scheduler_cls: Optional[type[torch.optim.lr_scheduler._LRScheduler]] = None
+    scheduler_cls: Optional[type[torch.optim.lr_scheduler._LRScheduler | torch.optim.lr_scheduler.ReduceLROnPlateau]] = None
     scheduler_kwargs: Optional[dict[str, Any]] = None
 
     # AMP / stability ---
@@ -69,7 +72,6 @@ class TrainerConfig:
 class TrainerState:
     """Resettable internal state for a single run."""
     epoch: int = 0
-    global_step: int = 0
 
     best_metric: Optional[float] = None # evaluator's primary, or val loss if no evaluator
     best_epoch: Optional[int] = None
@@ -80,6 +82,11 @@ class TrainerState:
     # simple per-epoch logs (optional; you can remove)
     train_logs: list[dict[str, Any]] = field(default_factory=list)
     val_logs: list[dict[str, Any]] = field(default_factory=list)
+
+    # cache: updated for best epoch
+    best_state_dict_cpu: Optional[dict[str, torch.Tensor]] = None
+    oof_logits: dict[str, torch.Tensor] = field(default_factory=dict)   # task -> logits  for all val samples at best epoch
+    oof_targets: dict[str, torch.Tensor] = field(default_factory=dict)  # task -> targets for all val samples at best epoch
 
 
 class Trainer:
@@ -347,20 +354,14 @@ class Trainer:
         """
         Runs one epoch of validation and returns an epoch-level logging dict.
 
-        Behavior:
-        - Computes mean val loss over batches (like train).
-        - If `self.batch_evaluator` is set: runs it per batch and aggregates **scalar numeric** metrics
-        as a sample-weighted mean over the epoch.
-        - If `self.dataset_evaluator` is set: caches (detached, CPU) tensors for its required_keys across
-        all batches, concatenates them at epoch end, and runs it once to produce dataset-level metrics.
-
-        Notes / assumptions:
-        - `batch` is dict[str, Any] and contains "x" (enforced convention).
-        - Evaluator.required_keys are "/"-paths that can be resolved from a nested dict `eval_in`
-        where we insert `eval_in["batch"] = batch`.
-        - Dataset-level evaluator required keys must resolve to Tensors whose first dim is the sample dim.
+        Also:
+        - Tracks "best epoch" according to dataset_evaluator primary (or val_loss if no evaluator)
+        - If this epoch becomes the new best, stores OOF logits/targets for all active calibrators:
+            self.state.oof_logits[task], self.state.oof_targets[task]
+        where task in self.model.active_calibrator_names.
         """
 
+        import math
         import numbers
         from collections import defaultdict
 
@@ -373,22 +374,16 @@ class Trainer:
         # helpers ---
         def _infer_batch_size(batch_dict: dict[str, Any]) -> int:
             x = batch_dict.get("x", None)
-            if torch.is_tensor(x):
+
+            if x is None:
+                raise KeyError("Expected batch to contain a Tensor 'x' key for primary model input, but it was not found. Cannot infer batch size.")
+
+            if not torch.is_tensor(x):
+                raise KeyError(f"'x' is supposed to be a Tensor for primary model input, but got {type(x).__name__}. Cannot infer batch size.")
+            else:
                 if x.ndim == 0:
                     raise ValueError("batch['x'] is scalar; cannot infer batch size.")
                 return int(x.shape[0])
-            if isinstance(x, dict):
-                # find first tensor leaf
-                for v in x.values():
-                    if torch.is_tensor(v):
-                        if v.ndim == 0:
-                            continue
-                        return int(v.shape[0])
-            # fallback: look anywhere in batch
-            for v in batch_dict.values():
-                if torch.is_tensor(v) and v.ndim >= 1:
-                    return int(v.shape[0])
-            raise ValueError("Could not infer batch size from batch; expected at least one Tensor with ndim>=1.")
 
         def _set_by_path(root: dict[str, Any], path: str, value: Any) -> None:
             cur = root
@@ -406,7 +401,6 @@ class Trainer:
             cur[parts[-1]] = value
 
         def _append_cached(cache: dict[str, list[torch.Tensor]], key: str, tensor: torch.Tensor) -> None:
-            # detach+cpu to avoid holding graph / GPU memory
             cache[key].append(tensor.detach().cpu())
 
         def _cat_cached_list(ts: list[torch.Tensor], key: str) -> torch.Tensor:
@@ -414,18 +408,55 @@ class Trainer:
                 raise ValueError(f"Empty cache list for key {key!r} (unexpected).")
             if len(ts) == 1:
                 return ts[0]
-            # handle scalar tensors: stack
             if ts[0].ndim == 0:
                 return torch.stack(ts, dim=0)
-            # otherwise concatenate along sample dim
             return torch.cat(ts, dim=0)
 
+        def _is_finite_number(x: Any) -> bool:
+            if x is None:
+                return False
+            if isinstance(x, bool) or not isinstance(x, numbers.Number):
+                return False
+            fx = float(x)
+            return math.isfinite(fx)
+
+        def _find_task_targets(task: str, batch_dict: dict[str, Any]) -> torch.Tensor:
+            """
+            Best-effort target discovery for calibration OOF storage.
+            Supports:
+            - batch[task] is a dict with keys in ('y','target','targets','label','labels')
+            - or flat batch keys: f"{task}/y" etc (rare, but some collates do this)
+            - or single-task fallback: batch['y'] / batch['target'] / batch['labels']
+            """
+            # nested under batch[task]
+            if task in batch_dict and isinstance(batch_dict[task], dict):
+                td = batch_dict[task]
+                for k in ("y", "target", "targets", "label", "labels"):
+                    v = td.get(k, None)
+                    if torch.is_tensor(v):
+                        return v
+            # flat keys
+            for k in (f"{task}/y", f"{task}/target", f"{task}/targets", f"{task}/label", f"{task}/labels"):
+                v = batch_dict.get(k, None)
+                if torch.is_tensor(v):
+                    return v
+            # single-task fallback
+            for k in ("y", "target", "targets", "label", "labels"):
+                v = batch_dict.get(k, None)
+                if torch.is_tensor(v):
+                    return v
+
+            raise KeyError(
+                f"Could not find calibration targets for task {task!r} in batch. "
+                f"Available top-level batch keys: {list(batch_dict.keys())}. "
+                f"Expected one of: batch[{task!r}][y/target/targets/label/labels] or a global y/target."
+            )
 
         # setup caches / accumulators ---
-
         dataset_required_keys: tuple[str, ...] = ()
         if getattr(self, "dataset_evaluator", None) is not None:
-            dataset_required_keys = tuple(self.dataset_evaluator.required_keys)  # union already for CompositeEvaluator
+            dataset_required_keys = tuple(self.dataset_evaluator.required_keys)
+
         dataset_cache: dict[str, list[torch.Tensor]] = defaultdict(list)
 
         batch_metric_sums: dict[str, float] = defaultdict(float)
@@ -434,10 +465,13 @@ class Trainer:
         total_loss = 0.0
         num_batches = 0
 
-        # validation loop ---
+        # --- OOF caches for calibrators (only committed if epoch becomes best) ---
+        active_calib_tasks = tuple(getattr(self.model, "active_calibrator_names", set()) or ())
+        oof_logits_cache: dict[str, list[torch.Tensor]] = defaultdict(list)
+        oof_targets_cache: dict[str, list[torch.Tensor]] = defaultdict(list)
+
         with torch.no_grad():
             for batch in val_loader:
-
                 if not isinstance(batch, dict):
                     raise TypeError(
                         f"Expected batch as dict[str, Any], got {type(batch)}. "
@@ -462,7 +496,6 @@ class Trainer:
                         )
                         eval_in = dict(model_out)
                         eval_in["batch"] = batch
-
                         loss: torch.Tensor = self.objective(inputs=eval_in)
                 else:
                     model_out = self.model(
@@ -472,10 +505,7 @@ class Trainer:
                     )
                     eval_in = dict(model_out)
                     eval_in["batch"] = batch
-
                     loss = self.objective(inputs=eval_in)
-
-                # loss return type (scalar tensor) is validated inside objective.
 
                 total_loss += float(loss.detach().item())
                 num_batches += 1
@@ -486,10 +516,9 @@ class Trainer:
                     if not isinstance(bm, dict):
                         raise TypeError(f"batch_evaluator must return dict[str, Any], got {type(bm).__name__}.")
 
-                    # Track per-metric weight separately (since some metrics may be None/NaN per batch)
                     for k, v in bm.items():
                         if v is None:
-                            continue  # skip missing metrics (e.g., mask absent)
+                            continue
                         if isinstance(v, bool):
                             raise TypeError(f"batch_evaluator metric {k!r} is bool; expected a numeric scalar or None.")
                         if not isinstance(v, numbers.Number):
@@ -499,8 +528,7 @@ class Trainer:
                             )
 
                         fv = float(v)
-                        # skip NaN / inf
-                        if not (fv == fv) or fv == float("inf") or fv == float("-inf"):
+                        if not math.isfinite(fv):
                             continue
 
                         batch_metric_sums[k] += fv * bs
@@ -517,6 +545,33 @@ class Trainer:
                             )
                         _append_cached(dataset_cache, key, val)
 
+                # OOF caching for calibrators (always cache; commit only if epoch becomes best)
+                if active_calib_tasks:
+                    # model_out is <task>.<key_returned_by_head>; we assume logits exists.
+                    for task in active_calib_tasks:
+                        if task not in model_out:
+                            continue
+                        node = model_out[task]
+                        if not isinstance(node, dict):
+                            continue
+                        logits = node.get("logits", None)
+                        if not torch.is_tensor(logits):
+                            raise KeyError(
+                                f"Expected model_out[{task!r}]['logits'] Tensor for calibrator OOF logging, got {type(logits).__name__}."
+                            )
+
+                        targets = _find_task_targets(task, batch)
+
+                        if targets.ndim == 0:
+                            raise ValueError("targets is scalar; cannot infer batch size.")
+                        if logits.ndim == 0:
+                            raise ValueError("logits is scalar; cannot infer batch size.")
+                        if int(targets.shape[0]) != int(logits.shape[0]):
+                            raise ValueError("targets and logits have incompatible batch sizes.")
+
+                        oof_logits_cache[task].append(logits.detach().cpu())
+                        oof_targets_cache[task].append(targets.detach().cpu())
+
         if num_batches == 0:
             raise ValueError("val_loader produced 0 batches.")
 
@@ -528,9 +583,6 @@ class Trainer:
 
         # aggregate batch metrics (skip None/NaN; if nothing valid epoch-wide -> None)
         if getattr(self, "batch_evaluator", None) is not None:
-            # Do NOT require any global weight now; metrics may be missing for the whole epoch.
-            # We aggregate per-metric with its own valid-weight sum.
-            # Include keys that appeared either in sums or weights (defensive).
             all_keys = set(batch_metric_sums.keys()) | set(batch_metric_weight_sums.keys())
             for k in sorted(all_keys):
                 w = float(batch_metric_weight_sums.get(k, 0.0))
@@ -540,6 +592,7 @@ class Trainer:
                     epoch_log[f"val_batch/{k}"] = batch_metric_sums.get(k, 0.0) / w
 
         # dataset evaluator: build epoch_inputs dict from cached tensors and run once
+        dataset_primary_value: Any = None
         if getattr(self, "dataset_evaluator", None) is not None:
             epoch_inputs: dict[str, Any] = {}
             for key, ts in dataset_cache.items():
@@ -550,9 +603,74 @@ class Trainer:
             if not isinstance(dm, dict):
                 raise TypeError(f"dataset_evaluator must return dict[str, Any], got {type(dm).__name__}.")
 
-            # dataset metrics can include curves / lists / dicts, so we just attach them
             for k, v in dm.items():
                 epoch_log[f"val/{k}"] = v
+
+            dataset_primary_value = dm.get(self.dataset_evaluator.primary_metric, None)
+
+        # -------------------------
+        # Best-epoch tracking + OOF commit
+        # -------------------------
+
+        # determine selection score (always maximize internally)
+        if getattr(self, "dataset_evaluator", None) is not None and _is_finite_number(dataset_primary_value):
+            raw_primary = float(dataset_primary_value)
+            if self.dataset_evaluator.direction == "maximize":
+                score = raw_primary
+            else:
+                score = -raw_primary
+            best_raw_for_state = raw_primary
+            best_metric_kind = "evaluator_primary"
+        else:
+            # fallback to val_loss (minimize)
+            raw_loss = float(epoch_log["val_loss"])
+            score = -raw_loss
+            best_raw_for_state = raw_loss
+            best_metric_kind = "val_loss"
+
+        # early stopping threshold (applies to score in max sense)
+        thr = self.config.early_stopping_threshold
+        thr = 0.0 if thr is None else float(thr)
+
+        # store best score in state (not part of dataclass; ok)
+        best_score_prev = getattr(self.state, "_best_score", None)
+        improved = (best_score_prev is None) or (score > float(best_score_prev) + thr)
+
+        if improved:
+            self.state.best_epoch = int(epoch)
+            self.state.best_metric = float(best_raw_for_state)
+            self.state.best_state_dict_cpu = self._get_model_state_dict_cpu()
+            setattr(self.state, "_best_score", float(score))
+            setattr(self.state, "_best_metric_kind", best_metric_kind)
+            self.state.epochs_since_improvement = 0
+
+            # commit OOF logits/targets for calibrators (only active + cached)
+            if active_calib_tasks:
+                if not hasattr(self.state, "oof_logits"):
+                    self.state.oof_logits = {}
+                if not hasattr(self.state, "oof_targets"):
+                    self.state.oof_targets = {}
+
+                for task in active_calib_tasks:
+                    ls = oof_logits_cache.get(task, [])
+                    ts = oof_targets_cache.get(task, [])
+                    if len(ls) == 0 or len(ts) == 0:
+                        # no samples for this task in this val epoch => store stable keys as empty
+                        self.state.oof_logits[task] = torch.empty(0)
+                        self.state.oof_targets[task] = torch.empty(0)
+                        continue
+
+                    # cat along batch dim
+                    log_cat = torch.cat(ls, dim=0) if ls[0].ndim >= 1 else torch.stack(ls, dim=0)
+                    tgt_cat = torch.cat(ts, dim=0) if ts[0].ndim >= 1 else torch.stack(ts, dim=0)
+
+                    self.state.oof_logits[task] = log_cat
+                    self.state.oof_targets[task] = tgt_cat
+        else:
+            self.state.epochs_since_improvement += 1
+
+        # expose selection score if you want (useful for optuna/pruning/debug)
+        epoch_log["__selection_score__"] = float(score)
 
         self.state.val_logs.append(epoch_log)
         return epoch_log
@@ -571,11 +689,124 @@ class Trainer:
         optuna_report_interval: Optional[int] = None,
     ) -> "Trainer":
         """
-        Fit for `max_epochs` using current config, with optional per-fit overrides.
-
-        NOTE: intentionally unimplemented.
+        Atomic fit:
+        - Optionally reset state/weights.
+        - Train for up to max_epochs.
+        - If val_loader is provided: validate each epoch, track best epoch, store OOF logits/targets
+        only when a new best is achieved (see _validate_one_epoch).
+        - Early stopping applies only when val_loader is provided.
+        - Optuna reporting/pruning uses the selection score (always "maximize" internally).
         """
-        raise NotImplementedError
+
+        # per-fit overrides (saved + restored)
+        old_grad_clip = self.config.grad_clip_norm
+        old_pat = self.config.early_stopping_patience
+        old_thr = self.config.early_stopping_threshold
+        old_rep = self.config.optuna_report_interval
+
+        if grad_clip_norm is not None:
+            self.config.grad_clip_norm = grad_clip_norm
+        if early_stopping_patience is not None:
+            self.config.early_stopping_patience = early_stopping_patience
+        if early_stopping_threshold is not None:
+            self.config.early_stopping_threshold = early_stopping_threshold
+        if optuna_report_interval is not None:
+            self.config.optuna_report_interval = optuna_report_interval
+
+        try:
+            if reset_state:
+                self.reset_state(reset_config=False)
+
+            # seed (atomic run)
+            if self.config.random_seed is not None:
+                s = int(self.config.random_seed)
+                torch.manual_seed(s)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(s)
+
+            # device
+            device = self.device
+            if not isinstance(device, torch.device):
+                device = torch.device(device)
+            self.model.to(device)
+
+            # max epochs
+            run_max_epochs = int(max_epochs) if max_epochs is not None else int(self.config.max_epochs)
+            if run_max_epochs <= 0:
+                raise ValueError(f"max_epochs must be > 0, got {run_max_epochs}.")
+
+            # early stopping
+            patience = self.config.early_stopping_patience
+            patience = None if patience is None else int(patience)
+            if patience is not None and patience < 0:
+                raise ValueError(f"early_stopping_patience must be >=0 or None, got {patience}.")
+
+            report_every = int(self.config.optuna_report_interval) if self.config.optuna_report_interval is not None else 1
+            if report_every <= 0:
+                report_every = 1
+
+            self._fit_called_at_least_once = True
+
+            for ep in range(1, run_max_epochs + 1):
+                self.state.epoch = ep
+
+                train_log = self._train_one_epoch(train_loader, epoch=ep)
+
+                # scheduler step (if without metric)
+
+                if self.scheduler is not None and not _scheduler_expects_metric(self.scheduler):
+                    self.scheduler.step()
+
+
+                if val_loader is not None:
+                    val_log = self._validate_one_epoch(val_loader, epoch=ep)
+
+                    # scheduler metric-aware step (best-effort)
+                    if self.scheduler is not None and _scheduler_expects_metric(self.scheduler):
+                        self.scheduler.step(val_log["val_loss"])
+
+                    # optuna report/prune
+                    if trial is not None and (ep % report_every == 0):
+                        score = val_log.get("__selection_score__", None)
+                        if score is None:
+                            # fallback: maximize -val_loss
+                            score = -float(val_log["val_loss"])
+                        self.maybe_report_to_trial(trial, value=float(score), step=ep)
+
+                    # early stopping
+                    if patience is not None:
+                        if self.state.epochs_since_improvement >= patience:
+                            break
+
+                else:
+                    # no validation => still allow optuna to observe train loss if wanted
+                    if trial is not None and (ep % report_every == 0):
+                        # maximize negative train loss
+                        score = -float(train_log["train_loss"])
+                        self.maybe_report_to_trial(trial, value=float(score), step=ep)
+
+            # store run summary in history if you want
+            self.history.append(
+                {
+                    "best_epoch": self.state.best_epoch,
+                    "best_metric": self.state.best_metric,
+                    "train_last": (self.state.train_logs[-1] if self.state.train_logs else None),
+                    "val_last": (self.state.val_logs[-1] if self.state.val_logs else None),
+                }
+            )
+
+            if self.state.best_state_dict_cpu is not None:
+                sd = {k: v.to(device, non_blocking=True) for k, v in self.state.best_state_dict_cpu.items()}
+                self.model.load_state_dict(sd, strict=True)
+
+            return self
+
+        finally:
+            # restore config overrides
+            self.config.grad_clip_norm = old_grad_clip
+            self.config.early_stopping_patience = old_pat
+            self.config.early_stopping_threshold = old_thr
+            self.config.optuna_report_interval = old_rep
 
     # -------------------------
     # Optuna helper hooks (optional usage in your future fit implementation)
@@ -588,7 +819,7 @@ class Trainer:
         value: float,
         step: int,
     ) -> None:
-        """Call trial.report and potentially raise TrialPruned (policy is up to you)."""
+        """Call trial.report and potentially raise TrialPruned."""
         if trial is None:
             return
         trial.report(value, step)
@@ -599,6 +830,10 @@ class Trainer:
     # Internals
     # -------------------------
 
+
+    def _get_model_state_dict_cpu(self) -> dict[str, torch.Tensor]:
+        # graph-disconnected cpu-based copy of model's state_dict (for stable snapshotting)
+        return {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
 
     def _load_initial_state_dict_cpu(
         self,
@@ -641,18 +876,14 @@ class Trainer:
                 )
 
         if rebuild_scaler:
-            self._scaler = torch.amp.GradScaler("cuda") if self.config.use_amp else None
+            device = torch.device(self.device) if not isinstance(self.device, torch.device) else self.device
+            self._scaler = torch.amp.GradScaler(enabled=(self.config.use_amp and device.type == "cuda"))
 
-# TODO: 
-# 1. implement fit().
-#    - early stopping
-#    - optuna reporting/pruning
-#    - validation every N epochs (configurable)
-# 2. handle resets
-# 3. write the kfolds (internal & external)
-#    they take a grid and reset Trainer's state and sets params.
-#    QUESTION: SHOULD FIT DO KFOLD INSIDE? DECIDE
 
 # NOTE: Dataset __collate_fn__ should:
 # 1. always return stable keys
 # 2. missing masks should be encoded as masks with None values
+# 3. [batch]["x"] must exist and be a tensor
+# 4. Targets from batch should be under batch[task][y/target/targets/label/labels]
+#    or at least [batch][y/target/targets/label/labels] for single-task.
+# 5. [batch]["x"] and [batch]["y/target/targets/label/labels"] should have the same batch size (dim=0)
