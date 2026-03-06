@@ -4,8 +4,8 @@ from typing import Any, Optional, Set, Tuple, List
 from torch import nn, Tensor
 from warnings import warn
 
-from torchkit.models.feature_adapter import FeatureAdapter
-from torchkit.models.fuse_module import FuseModule
+from torchkit.models.adapters import FeatureAdapter
+from torchkit.models.fuse import FuseModule
 
 import inspect
 

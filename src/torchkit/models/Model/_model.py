@@ -4,8 +4,8 @@ from typing import Any, Collection, Literal, Optional, ValuesView, ItemsView, Ke
 from torch import nn, Tensor
 
 from torchkit.models.backbone._backbone import Backbone
-from torchkit.models.calibrator._calibrator import Calibrator
-from torchkit.models.task_head._task_head import TaskHead
+from torchkit.models.calibration._calibrator import Calibrator
+from torchkit.models.head._task_head import TaskHead
 
 
 

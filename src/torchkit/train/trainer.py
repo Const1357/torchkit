@@ -9,7 +9,7 @@ from torch import Tensor
 
 import optuna
 
-from torchkit.models._interface import TorchkitModel
+from torchkit.models.Model._model import TorchkitModel
 from torchkit.objectives import Objective, MultitaskObjective
 from torchkit.evaluate import Evaluator
 
@@ -101,9 +101,9 @@ class Trainer:
         model: TorchkitModel,
         objective: Objective,
         *,
-        config: Optional[TrainerConfig] = None,
         dataset_evaluator: Optional[Evaluator] = None,
         batch_evaluator: Optional[Evaluator] = None,
+        config: Optional[TrainerConfig] = None,
     ):
         self.model = model
         self.objective = objective
