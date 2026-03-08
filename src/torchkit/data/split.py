@@ -3,6 +3,9 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 from typing import Any, Optional, final
+
+from sklearn.model_selection import train_test_split as sklearn_train_test_split
+
 from sklearn.model_selection import GroupKFold as SklearnGroupKFold
 from sklearn.model_selection import StratifiedKFold as SklearnStratifiedKFold
 from sklearn.model_selection import StratifiedGroupKFold as SklearnStratifiedGroupKFold
@@ -12,7 +15,25 @@ from torchkit.data._dataset import TorchkitDataset
 from torch.utils.data import Subset
 
 # TODO: when needed, extend this file to wrap more sklearn splitters.
-# NOTE: Update the DataSplitter type hint when adding new splitters.
+
+def train_test_split(
+    dataset: TorchkitDataset,
+    index: Any,
+    test_size: float = 0.2,
+    shuffle: bool = True,
+    random_state: Optional[int] = None,
+):
+    """Wrapper around `sklearn.model_selection.train_test_split` that returns the split Subsets of the original dataset."""
+    train_idx, test_idx = sklearn_train_test_split(
+        range(len(index)),
+        test_size=test_size,
+        shuffle=shuffle,
+        random_state=random_state,
+    )
+
+    return Subset(dataset, train_idx), Subset(dataset, test_idx)
+
+
 
 class KFoldSplitter(ABC):
     """Base class for K-Fold splitters."""

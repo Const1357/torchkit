@@ -12,6 +12,8 @@ class CalibratorSpec:
     cls: type[Calibrator] | None = None
     kwargs: dict[str, Any] = field(default_factory=dict)
 
+    active: bool = True
+
 
 class CalibratorFactory:
 

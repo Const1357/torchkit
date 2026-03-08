@@ -4,9 +4,10 @@ from typing import Any, Collection, Literal, Optional, ValuesView, ItemsView, Ke
 from torch import nn, Tensor
 
 from torchkit.models.backbone._backbone import Backbone
-from torchkit.models.calibration._calibrator import Calibrator
 from torchkit.models.head._task_head import TaskHead
+from torchkit.models.prediction._prediction_head import PredictionHead
 
+from warnings import warn
 
 
 # For type hinting the overridden methods of nn.ModuleDict
@@ -24,14 +25,14 @@ class _TaskHeadModuleDict(nn.ModuleDict):
         return super().keys()
     
 
-class _CalibratorModuleDict(nn.ModuleDict):
-    def __getitem__(self, key: str) -> Calibrator:  # type: ignore[override]
+class _PredictionHeadModuleDict(nn.ModuleDict):
+    def __getitem__(self, key: str) -> PredictionHead:  # type: ignore[override]
         return super().__getitem__(key)  # runtime returns the module
 
-    def items(self) -> ItemsView[str, Calibrator]:  # type: ignore[override]
+    def items(self) -> ItemsView[str, PredictionHead]:  # type: ignore[override]
         return super().items()
 
-    def values(self) -> ValuesView[Calibrator]:  # type: ignore[override]
+    def values(self) -> ValuesView[PredictionHead]:  # type: ignore[override]
         return super().values()
 
     def keys(self) -> KeysView[str]:  # type: ignore[override]
@@ -55,10 +56,10 @@ class TorchkitModel(nn.Module):
         self,
         backbone: Backbone,
         heads: dict[str, TaskHead],
-        calibrators: Optional[dict[str, Calibrator]] = None,
+        prediction_heads: Optional[dict[str, PredictionHead]] = None,
     ):
-        """calibrators are attached to heads by name.
-        If a calibrator is attached to a head, then the head MUST return a "logits" output."""
+        """Prediction heads are attached to heads by name.
+        If a prediction head is attached to a head, then the head MUST return a "logits" output."""
         super().__init__()
 
         if backbone is None:
@@ -89,20 +90,20 @@ class TorchkitModel(nn.Module):
 
         self.heads = _TaskHeadModuleDict(validated_heads)
 
-        # calibrators
-        if calibrators is None:
-            calibrators = {}
-        if not isinstance(calibrators, dict):
-            raise TypeError(f"`calibrators` must be a dict mapping str to Calibrator, got {type(calibrators)}.")
-        for name, calibrator in calibrators.items():
+        # prediction heads
+        if prediction_heads is None:
+            prediction_heads = {}
+        if not isinstance(prediction_heads, dict):
+            raise TypeError(f"`prediction_heads` must be a dict mapping str to PredictionHead, got {type(prediction_heads)}.")
+        for name, prediction_head in prediction_heads.items():
             if not isinstance(name, str):
-                raise TypeError(f"`calibrators` keys must be str, got {type(name)}: {name!r}.")
-            if not isinstance(calibrator, Calibrator):
-                raise TypeError(f"`calibrators` values must be instances of Calibrator, got {type(calibrator)} for key {name!r}.")
+                raise TypeError(f"`prediction_heads` keys must be str, got {type(name)}: {name!r}.")
+            if not isinstance(prediction_head, PredictionHead):
+                raise TypeError(f"`prediction_heads` values must be instances of PredictionHead, got {type(prediction_head)} for key {name!r}.")
             if name not in heads.keys():
-                raise ValueError(f"Calibrator {name!r} does not have a corresponding head in `heads`: {set(heads.keys())}. Each calibrator must correspond to a head by name.")
+                raise ValueError(f"PredictionHead {name!r} does not have a corresponding head in `heads`: {set(heads.keys())}. Each prediction head must correspond to a head by name.")
 
-        self.calibrators = _CalibratorModuleDict(calibrators)
+        self.prediction_heads = _PredictionHeadModuleDict(prediction_heads)
 
     # Note: we do not cache these properties to avoid state/sync bugs.
     # Recomputing cost is negligible due to the small number of heads, and we can optimize later if needed.
@@ -115,6 +116,18 @@ class TorchkitModel(nn.Module):
     def active_head_names(self) -> set[str]:
         """Returns the set of active head names."""
         return set(name for name, head in self.heads.items() if head.is_active)
+    
+    @property
+    def prediction_head_names(self) -> set[str]:
+        """Returns the set of all prediction head names."""
+        return set(self.prediction_heads.keys())
+    
+    @property
+    def active_prediction_head_names(self) -> set[str]:
+        """Returns the set of active prediction head names."""
+        if not self.prediction_heads:
+            return set()
+        return set(name for name in self.prediction_heads.keys() if self.prediction_heads[name].is_active)
     
     @property
     def all_required_features(self) -> set[str]:
@@ -136,36 +149,48 @@ class TorchkitModel(nn.Module):
         return features
     
     @property
-    def calibrator_names(self) -> set[str]:
-        """Returns the set of all calibrator names."""
-        return set(self.calibrators.keys())
-    
-    @property
-    def active_calibrator_names(self) -> set[str]:
-        """Returns the names of calibrators for active heads."""
-        return set(name for name in self.calibrators.keys() if self.heads[name].is_active)
+    def _active_calibrator_names(self) -> set[str]:
+        """Returns the names of active calibrators for active heads. Used for training calibrators."""
+        names = set()
+        for name, phead in self.prediction_heads.items():
+            if self.heads[name].is_active and phead.has_active_calibrator:
+                names.add(name)
+        return names
     
     # API helpers for enabling/disabling heads by name, and freezing/unfreezing backbone and heads by name ---
-    def enable_head(self, head_name: str | list[str]) -> "TorchkitModel":
-        """Enables the specified head(s) by name."""
+    def enable_head(self, head_name: str | list[str] | set[str]) -> "TorchkitModel":
+        """Enables the specified head(s) by name. Also enables the corresponding prediction head if it exists."""
         if isinstance(head_name, str):
             head_name = [head_name]
+        if isinstance(head_name, set):
+            head_name = list(head_name)
         for name in head_name:
             if name not in self.head_names:
                 raise ValueError(f"Cannot enable head {name!r} because it does not exist in the model's heads: {self.head_names}.")
             if name not in self.active_head_names:
                 self.heads[name].enable()
+                try:
+                    self.prediction_heads[name].enable()  # also enable corresponding prediction head if it exists
+                except KeyError:
+                    pass
+
         return self
 
-    def disable_head(self, head_name: str | list[str]) -> "TorchkitModel":
-        """Disables the specified head(s) by name."""
+    def disable_head(self, head_name: str | list[str] | set[str]) -> "TorchkitModel":
+        """Disables the specified head(s) by name. Also disables the corresponding prediction head if it exists."""
         if isinstance(head_name, str):
             head_name = [head_name]
+        if isinstance(head_name, set):
+            head_name = list(head_name)
         for name in head_name:
             if name not in self.head_names:
                 raise ValueError(f"Cannot disable head {name!r} because it does not exist in the model's heads: {self.head_names}.")
             if name in self.active_head_names:
                 self.heads[name].disable()
+                try:
+                    self.prediction_heads[name].disable()  # also disable corresponding prediction head if it exists
+                except KeyError:
+                    pass
         return self
 
     def freeze_backbone(self) -> "TorchkitModel":
@@ -175,20 +200,24 @@ class TorchkitModel(nn.Module):
         self.backbone.unfreeze()
         return self
 
-    def freeze_head(self, head_name: str | list[str]) -> "TorchkitModel":
+    def freeze_head(self, head_name: str | list[str] | set[str]) -> "TorchkitModel":
         """Freezes the specified head(s) by name."""
         if isinstance(head_name, str):
             head_name = [head_name]
+        if isinstance(head_name, set):
+            head_name = list(head_name)
         for name in head_name:
             if name not in self.head_names:
                 raise ValueError(f"Cannot freeze head {name!r} because it does not exist in the model's heads: {self.head_names}.")
             self.heads[name].freeze()
         return self
-    
-    def unfreeze_head(self, head_name: str | list[str]) -> "TorchkitModel":
+
+    def unfreeze_head(self, head_name: str | list[str] | set[str]) -> "TorchkitModel":
         """Unfreezes the specified head(s) by name."""
         if isinstance(head_name, str):
             head_name = [head_name]
+        if isinstance(head_name, set):
+            head_name = list(head_name)
         for name in head_name:
             if name not in self.head_names:
                 raise ValueError(f"Cannot unfreeze head {name!r} because it does not exist in the model's heads: {self.head_names}.")
@@ -237,8 +266,8 @@ class TorchkitModel(nn.Module):
         self,
         x: Tensor | dict[str, Tensor],
         *,
-        head_kwargs: Optional[dict[str, dict[str, Any]]] = None,
         backbone_kwargs: Optional[dict[str, Any]] = None,
+        head_kwargs: Optional[dict[str, dict[str, Any]]] = None,
         return_backbone_features: Optional[bool | str | Collection[str]] = None,
         ) -> dict[str, Any]:
         
@@ -287,14 +316,87 @@ class TorchkitModel(nn.Module):
             current_head_kwargs = head_kwargs.get(head_name, {})
             head_out = head(bb_out, payload=payload, head_module_kwargs=current_head_kwargs)
 
-            if head_name in self.calibrators:
+            if head_name in self.prediction_heads:
                 if "logits" not in head_out:
-                    raise KeyError(f"Head {head_name!r} has a calibrator but did not return 'logits' in its output. Calibrators require their head to return 'logits'.")
+                    raise KeyError(f"Head {head_name!r} has a PredictionHead but did not return 'logits' in its output.")
             
             out[head_name] = head_out
 
         return out
+    
+    def predict(
+        self,
+        x: Tensor | dict[str, Tensor],
+        *task_names: str,
+        backbone_kwargs: Optional[dict[str, Any]] = None,
+        head_kwargs: Optional[dict[str, dict[str, Any]]] = None,
+        return_backbone_features: Optional[bool | str | Collection[str]] = None,
+        return_raw_head_outputs: bool = False,
+    ) -> dict[str, Any]:
+        """Run prediction for the requested tasks.
 
+        `task_names` temporarily overrides head active status by enabling the
+        requested heads and disabling the rest for this call only.
+
+        Return format:
+        - keeps "backbone" if backbone features were requested
+        - includes only requested task entries
+        - for tasks with prediction heads, prediction outputs are attached under
+        out[task_name]["predictions"]
+        - for tasks without prediction heads, raw head outputs are returned
+        """
+
+        requested_task_names = set(task_names)
+        if not requested_task_names:
+            raise ValueError("At least one task name must be specified for prediction.")
+
+        invalid = requested_task_names - self.head_names
+        if invalid:
+            raise ValueError(
+                f"All task names must exist in the model. "
+                f"Invalid names: {invalid}. Valid head names: {self.head_names}."
+            )
+
+        previous_active_heads = self.active_head_names.copy()
+
+        self.enable_head(requested_task_names)
+        self.disable_head(previous_active_heads - requested_task_names)
+
+        try:
+            fwd_out: dict[str, Any] = self(
+                x,
+                backbone_kwargs=backbone_kwargs,
+                head_kwargs=head_kwargs,
+                return_backbone_features=return_backbone_features,
+            )
+
+            out: dict[str, Any] = {}
+
+            if "backbone" in fwd_out:
+                out["backbone"] = fwd_out["backbone"]
+
+            for task_name in requested_task_names:
+                head_out = fwd_out[task_name]
+
+                if task_name in self.prediction_heads:
+                    task_result = dict(head_out) if return_raw_head_outputs else {}
+                    phead: PredictionHead = self.prediction_heads[task_name]
+                    task_result["predictions"] = phead(head_out=head_out)
+                else:
+                    # No prediction head: raw head output is the best available prediction surface
+                    task_result = dict(head_out)
+
+                out[task_name] = task_result
+
+            return out
+
+        finally:
+            self.disable_head(self.head_names)
+            self.enable_head(previous_active_heads)
+
+
+
+            
 # ----------------------------------------------
 
 # Example usage:

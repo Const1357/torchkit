@@ -1,12 +1,11 @@
 from __future__ import annotations
-from typing import Any
+from typing import Any, final
 
 from torch.utils.data import Dataset
 from abc import abstractmethod, ABC
 
 from  torch import Tensor
 
-import torch
 
 # abstract class that performs validation of getitem output (ensure dict of tensors)
 class TorchkitDataset(Dataset, ABC):
@@ -17,7 +16,7 @@ class TorchkitDataset(Dataset, ABC):
     3. implement `my_getitem(self, index)` and return a dict. (`__getitem__` performs validation checks)
     
     ### *Note*
-    Suggestion: in your `__init__`, define the preprocessing and augmentation pipelines."""
+    Suggestion: in your `__init__`, define the preprocessing and augmentation pipelines. Use them in `my_getitem`."""
 
     @abstractmethod
     def __len__(self):
@@ -27,7 +26,7 @@ class TorchkitDataset(Dataset, ABC):
     def my_getitem(self, index) -> dict[str, Any]:
         raise NotImplementedError("Subclasses of TorchkitDataset should implement `my_getitem(self, index)` method.")
 
-    @abstractmethod
+    @final
     def __getitem__(self, index):
         # implement getitem here.
         item = self.my_getitem(index)
