@@ -33,7 +33,7 @@ from torchkit.train.trainer import Trainer
 from typing import Optional
 
 
-class OptunaNestedKFoldCV:
+class NestedOptunaSearchCV:
 
     def __init__(
         self,
@@ -47,6 +47,8 @@ class OptunaNestedKFoldCV:
         shuffle_outer: bool = False,
         shuffle_inner: bool = False,
         random_state: Optional[int] = None,
+
+        calibrate: bool = True,    # whether to fit a calibrator on the OOF logits from the outer-train folds
 
     ):
         self.trainer = trainer
