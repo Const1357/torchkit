@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 import torch
-from torch import Tensor
 
 from torchkit.evaluate._evaluator import Evaluator, MetricDirection
 
@@ -19,15 +18,17 @@ class ROCBinaryEvaluator(Evaluator):
         - Optimal threshold (max J)
 
     Expected inputs:
-        logits:  (N,2) or (N,)
-        targets: (N,) with {0,1}
+        - score tensor: (N,2), (N,1), or (N,)
+        - targets:      (N,) with {0,1}
+        - optionally probabilities: (N,2), (N,1), or (N,)
     """
 
     def __init__(
         self,
         *,
-        logits_key: str,
+        score_key: str,
         target_key: str,
+        probabilities_key: Optional[str] = None,
         name: str = "roc",
         primary_metric: str = "auc",
         direction: MetricDirection = "maximize",
@@ -40,32 +41,63 @@ class ROCBinaryEvaluator(Evaluator):
             weight=weight,
         )
 
-        self.logits_key = logits_key
+        self.score_key = score_key
         self.target_key = target_key
+        self.probabilities_key = probabilities_key
 
     @property
     def required_keys(self) -> tuple[str, ...]:
-        return (self.logits_key, self.target_key)
+        keys = [self.score_key, self.target_key]
+        if self.probabilities_key is not None:
+            keys.append(self.probabilities_key)
+        return tuple(keys)
+
+    def _resolve_score_tensor(self, inputs: dict[str, Any]) -> torch.Tensor:
+        try:
+            return self.resolve(inputs, self.score_key).detach()
+        except KeyError:
+            if self.score_key.endswith("calibrated_logits"):
+                fallback_key = self.score_key[: -len("calibrated_logits")] + "logits"
+                return self.resolve(inputs, fallback_key).detach()
+            raise
+
+    @staticmethod
+    def _binary_positive_probability(x: torch.Tensor) -> torch.Tensor:
+        if x.ndim == 2 and x.shape[1] == 2:
+            return torch.softmax(x, dim=1)[:, 1]
+        if x.ndim == 2 and x.shape[1] == 1:
+            return torch.sigmoid(x[:, 0])
+        if x.ndim == 1:
+            return torch.sigmoid(x)
+        raise ValueError(
+            f"Expected binary scores/probabilities of shape (N,), (N,1), or (N,2), got {tuple(x.shape)}."
+        )
 
     def metrics(self, *, inputs: dict[str, Any]) -> dict[str, Any]:
 
-        logits = self.resolve(inputs, self.logits_key).detach()
+        scores_tensor = self._resolve_score_tensor(inputs)
         targets = self.resolve(inputs, self.target_key).detach()
 
         if targets.ndim != 1:
-            raise ValueError("targets must be shape (N,)")
+            raise ValueError(f"targets must be shape (N,), got {tuple(targets.shape)}")
 
-        if logits.ndim == 2:
-            scores = torch.softmax(logits, dim=1)[:, 1]
-        elif logits.ndim == 1:
-            scores = torch.sigmoid(logits)
+        if self.probabilities_key is not None:
+            probs_tensor = self.resolve(inputs, self.probabilities_key).detach()
+            scores = self._binary_positive_probability(probs_tensor)
         else:
-            raise ValueError("logits must be shape (N,) or (N,2)")
+            scores = self._binary_positive_probability(scores_tensor)
+
+        if scores.ndim != 1:
+            raise ValueError(f"Resolved positive-class scores must be shape (N,), got {tuple(scores.shape)}")
+
+        if scores.shape[0] != targets.shape[0]:
+            raise ValueError(
+                f"Scores batch size {scores.shape[0]} does not match targets batch size {targets.shape[0]}"
+            )
 
         device = scores.device
         dtype = scores.dtype
 
-        # sort by score descending
         order = torch.argsort(scores, descending=True)
 
         scores = scores[order]
@@ -77,14 +109,17 @@ class ROCBinaryEvaluator(Evaluator):
         P = pos.sum().to(dtype)
         N = neg.sum().to(dtype)
 
-        # cumulative TP / FP
+        if P.item() == 0 or N.item() == 0:
+            raise ValueError(
+                f"ROCBinaryEvaluator requires both positive and negative samples. Got positives={int(P.item())}, negatives={int(N.item())}."
+            )
+
         tp = torch.cumsum(pos.to(dtype), dim=0)
         fp = torch.cumsum(neg.to(dtype), dim=0)
 
         tpr = tp / P
         fpr = fp / N
 
-        # prepend (0,0)
         zero = torch.zeros(1, device=device, dtype=dtype)
 
         tpr = torch.cat([zero, tpr])
@@ -93,12 +128,9 @@ class ROCBinaryEvaluator(Evaluator):
             [torch.tensor([1.0], device=device, dtype=dtype), scores]
         )
 
-        # exact ROC AUC
         auc = torch.trapz(tpr, fpr)
 
-        # Youden's J
         J = tpr - fpr
-
         j_idx = torch.argmax(J)
 
         best_threshold = thresholds[j_idx]
@@ -109,26 +141,18 @@ class ROCBinaryEvaluator(Evaluator):
         sensitivity = best_tpr
 
         return {
-
             "auc": float(auc),
-
             "youden_j": float(J[j_idx]),
             "youden_threshold": float(best_threshold),
-
             "sensitivity": float(sensitivity),
             "specificity": float(specificity),
-
             "tpr": float(best_tpr),
             "fpr": float(best_fpr),
-
-            # full ROC curve
             "roc_curve": {
                 "tpr": tpr.cpu().tolist(),
                 "fpr": fpr.cpu().tolist(),
                 "thresholds": thresholds.cpu().tolist(),
             },
-
-            # summaries
             "roc_curve/tpr_mean": float(tpr.mean()),
             "roc_curve/fpr_mean": float(fpr.mean()),
         }

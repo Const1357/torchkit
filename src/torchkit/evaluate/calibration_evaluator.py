@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 import torch
 
@@ -18,15 +18,17 @@ class CalibrationEvaluator(Evaluator):
         - Calibration curve
 
     Expected inputs:
-        logits:  (N,2) or (N,)
-        targets: (N,) with {0,1}
+        - score tensor: (N,2), (N,1), or (N,)
+        - targets:      (N,) with {0,1}
+        - optionally probabilities: (N,2), (N,1), or (N,)
     """
 
     def __init__(
         self,
         *,
-        logits_key: str,
+        score_key: str,
         target_key: str,
+        probabilities_key: Optional[str] = None,
         name: str = "calibration",
         primary_metric: str = "brier",
         direction: MetricDirection = "minimize",
@@ -40,39 +42,67 @@ class CalibrationEvaluator(Evaluator):
             weight=weight,
         )
 
-        self.logits_key = logits_key
+        self.score_key = score_key
         self.target_key = target_key
+        self.probabilities_key = probabilities_key
         self.n_bins = n_bins
 
     @property
     def required_keys(self) -> tuple[str, ...]:
-        return (self.logits_key, self.target_key)
+        keys = [self.score_key, self.target_key]
+        if self.probabilities_key is not None:
+            keys.append(self.probabilities_key)
+        return tuple(keys)
+
+    def _resolve_score_tensor(self, inputs: dict[str, Any]) -> torch.Tensor:
+        try:
+            return self.resolve(inputs, self.score_key).detach()
+        except KeyError:
+            if self.score_key.endswith("calibrated_logits"):
+                fallback_key = self.score_key[: -len("calibrated_logits")] + "logits"
+                return self.resolve(inputs, fallback_key).detach()
+            raise
+
+    @staticmethod
+    def _binary_positive_probability(x: torch.Tensor) -> torch.Tensor:
+        if x.ndim == 2 and x.shape[1] == 2:
+            return torch.softmax(x, dim=1)[:, 1]
+        if x.ndim == 2 and x.shape[1] == 1:
+            return torch.sigmoid(x[:, 0])
+        if x.ndim == 1:
+            return torch.sigmoid(x)
+        raise ValueError(f"Expected binary scores/probabilities of shape (N,), (N,1), or (N,2), got {tuple(x.shape)}.")
 
     def metrics(self, *, inputs: dict[str, Any]) -> dict[str, Any]:
 
-        logits = self.resolve(inputs, self.logits_key).detach()
+        scores = self._resolve_score_tensor(inputs)
         targets = self.resolve(inputs, self.target_key).detach()
 
-        if logits.ndim == 2:
-            probs = torch.softmax(logits, dim=1)[:, 1]
-        elif logits.ndim == 1:
-            probs = torch.sigmoid(logits)
+        if targets.ndim != 1:
+            raise ValueError(f"targets must be shape (N,), got {tuple(targets.shape)}")
+
+        if self.probabilities_key is not None:
+            probs_tensor = self.resolve(inputs, self.probabilities_key).detach()
+            probs = self._binary_positive_probability(probs_tensor)
         else:
-            raise ValueError("logits must be shape (N,) or (N,2)")
+            probs = self._binary_positive_probability(scores)
+
+        if probs.ndim != 1:
+            raise ValueError(f"Resolved positive-class probabilities must be shape (N,), got {tuple(probs.shape)}")
+
+        if probs.shape[0] != targets.shape[0]:
+            raise ValueError(
+                f"Probabilities batch size {probs.shape[0]} does not match targets batch size {targets.shape[0]}"
+            )
 
         targets = targets.float()
 
-        # ---------------- Brier score ----------------
-
         brier = torch.mean((probs - targets) ** 2)
-
-        # ---------------- Calibration bins ----------------
 
         bin_edges = torch.linspace(0, 1, self.n_bins + 1, device=probs.device)
 
         bin_confidence = []
         bin_accuracy = []
-        bin_count = []
 
         ece = torch.tensor(0.0, device=probs.device)
         mce = torch.tensor(0.0, device=probs.device)
@@ -80,11 +110,13 @@ class CalibrationEvaluator(Evaluator):
         N = len(probs)
 
         for i in range(self.n_bins):
-
             lo = bin_edges[i]
             hi = bin_edges[i + 1]
 
-            mask = (probs >= lo) & (probs < hi)
+            if i == self.n_bins - 1:
+                mask = (probs >= lo) & (probs <= hi)
+            else:
+                mask = (probs >= lo) & (probs < hi)
 
             if mask.sum() == 0:
                 continue
@@ -104,26 +136,21 @@ class CalibrationEvaluator(Evaluator):
 
             bin_confidence.append(conf)
             bin_accuracy.append(acc)
-            bin_count.append(mask.sum())
 
         if len(bin_confidence) == 0:
-            # degenerate case
-            bin_confidence = torch.tensor([], device=probs.device)
-            bin_accuracy = torch.tensor([], device=probs.device)
+            bin_confidence_t = torch.tensor([], device=probs.device)
+            bin_accuracy_t = torch.tensor([], device=probs.device)
         else:
-            bin_confidence = torch.stack(bin_confidence)
-            bin_accuracy = torch.stack(bin_accuracy)
+            bin_confidence_t = torch.stack(bin_confidence)
+            bin_accuracy_t = torch.stack(bin_accuracy)
 
         return {
-
             "brier": float(brier),
-
             "ece": float(ece),
             "mce": float(mce),
-
             "calibration_curve": {
-                "confidence": bin_confidence.cpu().tolist(),
-                "accuracy": bin_accuracy.cpu().tolist(),
+                "confidence": bin_confidence_t.cpu().tolist(),
+                "accuracy": bin_accuracy_t.cpu().tolist(),
                 "bin_edges": bin_edges.cpu().tolist(),
-            }
+            },
         }

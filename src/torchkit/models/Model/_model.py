@@ -378,10 +378,27 @@ class TorchkitModel(nn.Module):
             for task_name in requested_task_names:
                 head_out = fwd_out[task_name]
 
+                if not isinstance(head_out, dict):
+                    raise TypeError(
+                        f"Expected head output for task {task_name!r} to be a dict[str, Any], "
+                        f"got {type(head_out).__name__}."
+                    )
+
                 if task_name in self.prediction_heads:
                     task_result = dict(head_out) if return_raw_head_outputs else {}
                     phead: PredictionHead = self.prediction_heads[task_name]
-                    task_result["predictions"] = phead(head_out=head_out)
+
+                    pred_out = phead(head_out=head_out)
+                    if pred_out is None:
+                        out[task_name] = task_result
+                        continue
+                    if not isinstance(pred_out, dict):
+                        raise TypeError(
+                            f"PredictionHead for task {task_name!r} must return dict[str, Any] or None, "
+                            f"got {type(pred_out).__name__}."
+                        )
+
+                    task_result.update(pred_out)
                 else:
                     # No prediction head: raw head output is the best available prediction surface
                     task_result = dict(head_out)

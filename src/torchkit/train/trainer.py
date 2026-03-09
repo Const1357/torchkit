@@ -489,19 +489,23 @@ class Trainer:
                 # forward + loss
                 if self.config.use_amp:
                     with torch.autocast(device_type=device.type):
-                        model_out = self.model(
+                        model_out = self.model.predict(
                             batch,
+                            *self.model.active_head_names,
                             backbone_kwargs=self.config.backbone_kwargs,
                             head_kwargs=self.config.head_kwargs,
+                            return_raw_head_outputs=True,
                         )
                         eval_in = dict(model_out)
                         eval_in["batch"] = batch
                         loss: torch.Tensor = self.objective(inputs=eval_in)
                 else:
-                    model_out = self.model(
+                    model_out = self.model.predict(
                         batch,
+                        *self.model.active_head_names,
                         backbone_kwargs=self.config.backbone_kwargs,
                         head_kwargs=self.config.head_kwargs,
+                        return_raw_head_outputs=True,
                     )
                     eval_in = dict(model_out)
                     eval_in["batch"] = batch

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from typing import Any, Optional, final
+from typing import Any, Optional, final, Iterator, Tuple
+import numpy as np
 
 from sklearn.model_selection import train_test_split as sklearn_train_test_split
 
@@ -10,7 +11,7 @@ from sklearn.model_selection import GroupKFold as SklearnGroupKFold
 from sklearn.model_selection import StratifiedKFold as SklearnStratifiedKFold
 from sklearn.model_selection import StratifiedGroupKFold as SklearnStratifiedGroupKFold
 
-from torchkit.data._dataset import TorchkitDataset
+from torchkit.data import TorchkitDataset
 
 from torch.utils.data import Subset
 
@@ -62,7 +63,7 @@ class GroupKFold(KFoldSplitter):
         super().__init__(n_splits=n_splits, shuffle=shuffle, random_state=random_state)
 
     @final
-    def split(self, dataset: TorchkitDataset, index: Any, groups: Any):
+    def split(self, dataset: TorchkitDataset, index: Any, groups: Any) -> Iterator[Tuple[Subset, Subset]]:
         
         gkf = SklearnGroupKFold(
             n_splits=self.n_splits,
@@ -70,11 +71,9 @@ class GroupKFold(KFoldSplitter):
             random_state=self.random_state,
         )  
 
-        import numpy as np
         dummy_X = np.arange(len(index))  # dummy X, not used in splitting
-        train_idx, val_idx =  gkf.split(dummy_X, index, groups)
-
-        return Subset(dataset, train_idx), Subset(dataset, val_idx)
+        for train_idx, val_idx in gkf.split(dummy_X, index, groups):
+            yield Subset(dataset, train_idx), Subset(dataset, val_idx)
 
 class StratifiedKFold(KFoldSplitter):
     """`StratifiedKFold` is a wrapper around `sklearn.StratifiedKFold`."""
@@ -83,7 +82,7 @@ class StratifiedKFold(KFoldSplitter):
         super().__init__(n_splits=n_splits, shuffle=shuffle, random_state=random_state)
 
     @final
-    def split(self, dataset: TorchkitDataset, index: Any):
+    def split(self, dataset: TorchkitDataset, index: Any) -> Iterator[Tuple[Subset, Subset]]:
         
         skf = SklearnStratifiedKFold(
             n_splits=self.n_splits,
@@ -91,11 +90,9 @@ class StratifiedKFold(KFoldSplitter):
             random_state=self.random_state,
         )  
 
-        import numpy as np
         dummy_X = np.arange(len(index))  # dummy X, not used in splitting
-        train_idx, val_idx =  skf.split(dummy_X, index)
-
-        return Subset(dataset, train_idx), Subset(dataset, val_idx)
+        for train_idx, val_idx in skf.split(dummy_X, index):
+            yield Subset(dataset, train_idx), Subset(dataset, val_idx)
 
 
 class StratifiedGroupKFold(KFoldSplitter):
@@ -105,7 +102,7 @@ class StratifiedGroupKFold(KFoldSplitter):
         super().__init__(n_splits=n_splits, shuffle=shuffle, random_state=random_state)
 
     @final
-    def split(self, dataset: TorchkitDataset, index: Any, groups: Any):
+    def split(self, dataset: TorchkitDataset, index: Any, groups: Any) -> Iterator[Tuple[Subset, Subset]]:
         
         sgkf = SklearnStratifiedGroupKFold(
             n_splits=self.n_splits,
@@ -113,8 +110,6 @@ class StratifiedGroupKFold(KFoldSplitter):
             random_state=self.random_state,
         )  
 
-        import numpy as np
         dummy_X = np.arange(len(index))  # dummy X, not used in splitting
-        train_idx, val_idx =  sgkf.split(dummy_X, index, groups)
-
-        return Subset(dataset, train_idx), Subset(dataset, val_idx)
+        for train_idx, val_idx in sgkf.split(dummy_X, index, groups):
+            yield Subset(dataset, train_idx), Subset(dataset, val_idx)
