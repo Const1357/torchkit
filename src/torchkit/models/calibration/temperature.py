@@ -7,7 +7,7 @@ from torchkit.models.calibration._calibrator import Calibrator
 
 
 class TemperatureScalingCalibrator(Calibrator):
-    def __init__(self, init_temp: float = 1.0, max_iter: int = 50, lr: float = 0.01, active: bool = True):
+    def __init__(self, init_temp: float = 1.0, max_iter: int = 50, lr: float = 0.01, active: bool = False):
         super().__init__(active=active)
 
         if init_temp <= 0:

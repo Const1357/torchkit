@@ -12,7 +12,7 @@ class Calibrator(nn.Module, ABC):
     # contracts for calibration:
     # - forward takes logits Tensor and returns calibrated logits Tensor of identical shape
     # - fit learns calibration parameters from gathered logits and targets
-    def __init__(self, *args, active: bool = True, **kwargs):
+    def __init__(self, *args, active: bool = False, **kwargs):
         self._active = bool(active)
         super().__init__()
 

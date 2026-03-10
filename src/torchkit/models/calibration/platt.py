@@ -7,7 +7,7 @@ from torchkit.models.calibration._calibrator import Calibrator
 
 
 class PlattScalingCalibrator(Calibrator):
-    def __init__(self, init_a: float = 1.0, init_b: float = 0.0, max_iter: int = 100, lr: float = 0.01, active: bool = True):
+    def __init__(self, init_a: float = 1.0, init_b: float = 0.0, max_iter: int = 100, lr: float = 0.01, active: bool = False):
         super().__init__(active=active)
 
         if max_iter <= 0:

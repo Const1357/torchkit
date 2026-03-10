@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Literal, Optional, Tuple
 
 import copy
+import os
 import statistics
 
 import optuna
@@ -12,7 +13,7 @@ from torch.utils.data import DataLoader, Dataset, Subset
 
 from torchkit.data._dataset import TorchkitDataset
 from torchkit.data.split import KFoldSplitter
-from torchkit.models.Model.factory import TorchkitModelSpec
+from torchkit.models.Model.factory import TorchkitModelFactory, TorchkitModelSpec
 from torchkit.train.factory import TrainerFactory, TrainerSpec
 from torchkit.train.trainer import Trainer
 
@@ -73,10 +74,14 @@ class OuterFoldResult:
     selected_inner_metric_min: Optional[float] = None
     selected_inner_metric_max: Optional[float] = None
 
+    final_model_spec: Optional[TorchkitModelSpec] = None
+    final_trainer_spec: Optional[TrainerSpec] = None
+
     final_fit_epochs: Optional[int] = None
     final_best_epoch: Optional[int] = None
     final_best_metric: Optional[float] = None
     final_model_state_dict_cpu: Optional[dict[str, torch.Tensor]] = None
+    final_model_state_dict_path: Optional[str] = None
 
     test_metrics: Optional[dict[str, Any]] = None
 
@@ -84,6 +89,57 @@ class OuterFoldResult:
 @dataclass
 class NestedCVResult:
     outer_results: list[OuterFoldResult]
+
+    def rebuild_final_model(
+        self,
+        outer_fold: int,
+        *,
+        device: torch.device | str = "cpu",
+    ):
+        outer = self.outer_results[outer_fold]
+
+        if outer.final_model_spec is None:
+            raise ValueError(f"Outer fold {outer_fold} does not contain final_model_spec.")
+
+        if outer.final_model_state_dict_path is not None:
+            return TorchkitModelFactory.build(
+                copy.deepcopy(outer.final_model_spec),
+                state_dict_path=outer.final_model_state_dict_path,
+                device=device,
+            )
+
+        if outer.final_model_state_dict_cpu is not None:
+            return TorchkitModelFactory.build(
+                copy.deepcopy(outer.final_model_spec),
+                state_dict=outer.final_model_state_dict_cpu,
+                device=device,
+            )
+
+        raise ValueError(
+            f"Outer fold {outer_fold} does not contain a saved final model state_dict "
+            f"(neither in-memory nor on disk)."
+        )
+
+    def rebuild_final_trainer(
+        self,
+        outer_fold: int,
+        *,
+        device: torch.device | str = "cpu",
+    ) -> Trainer:
+        outer = self.outer_results[outer_fold]
+
+        if outer.final_trainer_spec is None:
+            raise ValueError(f"Outer fold {outer_fold} does not contain final_trainer_spec.")
+
+        model = self.rebuild_final_model(outer_fold, device=device)
+
+        trainer_spec = copy.deepcopy(outer.final_trainer_spec)
+        trainer_spec.config.device = device
+
+        return TrainerFactory.build(
+            trainer_spec,
+            model=model,
+        )
 
 
 def _set_by_path(root: Any, path: str, value: Any) -> None:
@@ -177,12 +233,16 @@ class NestedOptunaSearchCV:
         shuffle_inner: bool = False,
         random_state: Optional[int] = None,
         calibrate: bool = True,
+        final_model_dir: Optional[str] = None,
+        keep_final_model_state_dict_cpu: bool = True,
     ):
         self.model_spec = copy.deepcopy(model_spec)
         self.trainer_spec = copy.deepcopy(trainer_spec)
         self.parameter_grid = parameter_grid
         self.calibrate = calibrate
         self.n_trials = int(n_trials)
+        self.final_model_dir = final_model_dir
+        self.keep_final_model_state_dict_cpu = bool(keep_final_model_state_dict_cpu)
 
         if self.n_trials <= 0:
             raise ValueError(f"n_trials must be > 0, got {self.n_trials}.")
@@ -196,6 +256,9 @@ class NestedOptunaSearchCV:
             raise ValueError(
                 f"max_trial_attempts must be >= n_trials. Got max_trial_attempts={self.max_trial_attempts}, n_trials={self.n_trials}."
             )
+
+        if self.final_model_dir is not None:
+            os.makedirs(self.final_model_dir, exist_ok=True)
 
         self.outer_splitter = outer_splitter_cls(
             n_splits=k_outer,
@@ -342,6 +405,7 @@ class NestedOptunaSearchCV:
             logits = trial_result.aggregate_oof_logits[task]
             targets = trial_result.aggregate_oof_targets[task]
             calibrator.fit(logits=logits, targets=targets)
+            calibrator.enable()
 
     def _evaluate_holdout(
         self,
@@ -540,7 +604,7 @@ class NestedOptunaSearchCV:
                 float(max(selected_inner_metrics)) if selected_inner_metrics else None
             )
 
-            _, _, final_trainer = self._build_trainer_for_trial(params=best_params)
+            final_model_spec, final_trainer_spec, final_trainer = self._build_trainer_for_trial(params=best_params)
             outer_train_loader = self.dataloader_factory(outer_train_dataset, True)
 
             inner_best_epochs = [r.best_epoch for r in best_trial_result.inner_results if r.best_epoch is not None]
@@ -562,6 +626,14 @@ class NestedOptunaSearchCV:
             test_metrics = self._evaluate_holdout(final_trainer, outer_test_dataset)
 
             final_model_state_dict_cpu = final_trainer._get_model_state_dict_cpu()
+            final_model_state_dict_path = None
+
+            if self.final_model_dir is not None:
+                final_model_state_dict_path = os.path.join(
+                    self.final_model_dir,
+                    f"final_model_fold{outer_fold}.pt",
+                )
+                torch.save(final_model_state_dict_cpu, final_model_state_dict_path)
 
             outer_results.append(
                 OuterFoldResult(
@@ -579,10 +651,13 @@ class NestedOptunaSearchCV:
                     selected_inner_metric_std=selected_inner_metric_std,
                     selected_inner_metric_min=selected_inner_metric_min,
                     selected_inner_metric_max=selected_inner_metric_max,
+                    final_model_spec=copy.deepcopy(final_model_spec),
+                    final_trainer_spec=copy.deepcopy(final_trainer_spec),
                     final_fit_epochs=final_fit_epochs,
                     final_best_epoch=None,
                     final_best_metric=None,
-                    final_model_state_dict_cpu=final_model_state_dict_cpu,
+                    final_model_state_dict_cpu=final_model_state_dict_cpu if self.keep_final_model_state_dict_cpu else None,
+                    final_model_state_dict_path=final_model_state_dict_path,
                     test_metrics=test_metrics,
                 )
             )

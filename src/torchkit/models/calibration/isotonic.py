@@ -7,7 +7,7 @@ from torchkit.models.calibration._calibrator import Calibrator
 
 
 class IsotonicRegressionCalibrator(Calibrator):
-    def __init__(self, eps: float = 1e-6, active: bool = True):
+    def __init__(self, eps: float = 1e-6, active: bool = False):
         super().__init__(active=active)
 
         if not (0.0 < eps < 0.5):
