@@ -12,7 +12,7 @@ dependencies = [
   "numpy",
   "scikit-learn",
   "torch",
-  "typing-extensions; python_version < '3.11'",
+  "optuna",
 ]
 
 [tool.setuptools]
@@ -22,6 +22,6 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [project.optional-dependencies]
-optuna = ["optuna"] # will implement OptunaSearchCV later
+optuna = ["optuna"]
 test = ["pytest"]
 dev = ["pytest", "ruff", "build", "twine"]
