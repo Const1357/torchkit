@@ -6,9 +6,10 @@ import torch
 from torch import Tensor
 
 from torchkit.evaluate._evaluator import Evaluator, MetricDirection
+from torchkit.evaluate._calibrated_logits_fallback_mixin import CalibratedLogitsFallbackMixin
 
 
-class ClassificationEvaluator(Evaluator):
+class ClassificationEvaluator(CalibratedLogitsFallbackMixin, Evaluator):
     """
     Evaluates classification outputs.
 
@@ -52,14 +53,6 @@ class ClassificationEvaluator(Evaluator):
             keys.append(self.predictions_key)
         return tuple(keys)
 
-    def _resolve_score_tensor(self, inputs: dict[str, Any]) -> Tensor:
-        try:
-            return self.resolve(inputs, self.score_key).detach()
-        except KeyError:
-            if self.score_key.endswith("calibrated_logits"):
-                fallback_key = self.score_key[: -len("calibrated_logits")] + "logits"
-                return self.resolve(inputs, fallback_key).detach()
-            raise
 
     @staticmethod
     def _infer_num_classes(x: Tensor) -> int:

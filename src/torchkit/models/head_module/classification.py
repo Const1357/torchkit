@@ -10,10 +10,8 @@ class ClassifierHeadLinear(nn.Module):
         self.linear = nn.Linear(input_dim, num_classes)
         self.n_output = num_classes
 
-    def forward(self, x: Tensor, *, return_prob: bool = False) -> dict[str, Tensor]:
+    def forward(self, x: Tensor) -> dict[str, Tensor]:
         logits = self.linear(x)
-        if return_prob:
-            return {"logits": logits, "prob": logits.softmax(dim=-1) if self.n_output > 2 else logits.sigmoid()}
         return {"logits": logits}
 
 
@@ -61,18 +59,8 @@ class ClassifierHeadMLP(nn.Module):
     def forward(
         self,
         x: Tensor,
-        *,
-        return_prob: bool = False,
     ) -> dict[str, Tensor]:
 
         logits = self.mlp(x)
 
-        if not return_prob:
-            return {"logits": logits}
-
-        if self.n_output == 1:
-            prob = logits.sigmoid()
-        else:
-            prob = logits.softmax(dim=-1)
-
-        return {"logits": logits, "prob": prob}
+        return {"logits": logits}

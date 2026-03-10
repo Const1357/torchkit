@@ -5,6 +5,7 @@ from typing import Any, Callable, Literal, Optional, Tuple
 import copy
 import os
 import statistics
+import traceback
 
 import optuna
 from optuna.trial import TrialState
@@ -33,15 +34,23 @@ TrialStatus = Literal[
     "PRUNED",
 ]
 
+MetricDirection = Literal["maximize", "minimize"]
+
 
 @dataclass
 class InnerFoldResult:
     fold: int
-    best_metric: Optional[float]
-    best_epoch: Optional[int]
+
+    inner_train_indices: list[int] = field(default_factory=list)
+    inner_val_indices: list[int] = field(default_factory=list)
+
+    best_metric: Optional[float] = None
+    best_epoch: Optional[int] = None
     best_state_dict_cpu: Optional[dict[str, torch.Tensor]] = None
+
     oof_logits: dict[str, torch.Tensor] = field(default_factory=dict)
     oof_targets: dict[str, torch.Tensor] = field(default_factory=dict)
+    oof_sample_indices: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -49,24 +58,38 @@ class TrialResult:
     trial_number: int
     params: dict[str, Any]
     status: TrialStatus
+
     aggregate_metric: Optional[float]
+    aggregate_selection_score: Optional[float]
+
     inner_results: list[InnerFoldResult] = field(default_factory=list)
+
     aggregate_oof_logits: dict[str, torch.Tensor] = field(default_factory=dict)
     aggregate_oof_targets: dict[str, torch.Tensor] = field(default_factory=dict)
+    aggregate_oof_sample_indices: list[int] = field(default_factory=list)
+
     error_message: Optional[str] = None
+    error_traceback: Optional[str] = None
 
 
 @dataclass
 class OuterFoldResult:
     fold: int
-    best_params: dict[str, Any]
-    best_metric: float
-    best_trial_number: int
-    attempted_trials: int
-    successful_trials: int
-    failed_trials: int
-    pruned_trials: int
-    trial_results: list[TrialResult]
+
+    outer_train_indices: list[int] = field(default_factory=list)
+    outer_test_indices: list[int] = field(default_factory=list)
+
+    best_params: dict[str, Any] = field(default_factory=dict)
+    best_metric: float = 0.0
+    best_selection_score: float = 0.0
+    best_trial_number: int = -1
+
+    attempted_trials: int = 0
+    successful_trials: int = 0
+    failed_trials: int = 0
+    pruned_trials: int = 0
+
+    trial_results: list[TrialResult] = field(default_factory=list)
 
     selected_inner_results: list[InnerFoldResult] = field(default_factory=list)
     selected_inner_metric_mean: Optional[float] = None
@@ -78,8 +101,16 @@ class OuterFoldResult:
     final_trainer_spec: Optional[TrainerSpec] = None
 
     final_fit_epochs: Optional[int] = None
+    final_epochs_ran: Optional[int] = None
+
+    # For the final refit (which is train-only by design), these may legitimately be None.
     final_best_epoch: Optional[int] = None
     final_best_metric: Optional[float] = None
+
+    final_train_logs: list[dict[str, Any]] = field(default_factory=list)
+    final_val_logs: list[dict[str, Any]] = field(default_factory=list)
+    final_history: list[dict[str, Any]] = field(default_factory=list)
+
     final_model_state_dict_cpu: Optional[dict[str, torch.Tensor]] = None
     final_model_state_dict_path: Optional[str] = None
 
@@ -89,6 +120,28 @@ class OuterFoldResult:
 @dataclass
 class NestedCVResult:
     outer_results: list[OuterFoldResult]
+
+    # CV-level metadata for offline reporting / auditability
+    base_model_spec: TorchkitModelSpec
+    base_trainer_spec: TrainerSpec
+    parameter_grid: dict[str, Tuple[list, SuggestionType]]
+
+    outer_splitter_name: str
+    inner_splitter_name: str
+    k_outer: int
+    k_inner: int
+    shuffle_outer: bool
+    shuffle_inner: bool
+    random_state: Optional[int]
+
+    n_trials: int
+    max_trial_attempts: int
+    calibrate: bool
+    final_model_dir: Optional[str]
+    keep_final_model_state_dict_cpu: bool
+
+    selection_metric_name: str
+    selection_metric_direction: MetricDirection
 
     def rebuild_final_model(
         self,
@@ -214,6 +267,21 @@ def _concat_tensor_dicts(dicts: list[dict[str, torch.Tensor]]) -> dict[str, torc
     return merged
 
 
+def _resolve_original_indices_for_subset(subset: Subset) -> list[int]:
+    """
+    Resolve nested Subset indices back to original dataset coordinates.
+    """
+    indices = list(subset.indices)
+    base = subset.dataset
+
+    while isinstance(base, Subset):
+        parent_indices = list(base.indices)
+        indices = [parent_indices[i] for i in indices]
+        base = base.dataset
+
+    return indices
+
+
 class NestedOptunaSearchCV:
 
     def __init__(
@@ -238,7 +306,17 @@ class NestedOptunaSearchCV:
     ):
         self.model_spec = copy.deepcopy(model_spec)
         self.trainer_spec = copy.deepcopy(trainer_spec)
-        self.parameter_grid = parameter_grid
+        self.parameter_grid = copy.deepcopy(parameter_grid)
+
+        self.outer_splitter_cls = outer_splitter_cls
+        self.inner_splitter_cls = inner_splitter_cls
+
+        self.k_outer = int(k_outer)
+        self.k_inner = int(k_inner)
+        self.shuffle_outer = bool(shuffle_outer)
+        self.shuffle_inner = bool(shuffle_inner)
+        self.random_state = random_state
+
         self.calibrate = calibrate
         self.n_trials = int(n_trials)
         self.final_model_dir = final_model_dir
@@ -260,16 +338,22 @@ class NestedOptunaSearchCV:
         if self.final_model_dir is not None:
             os.makedirs(self.final_model_dir, exist_ok=True)
 
+        if (self.final_model_dir is None) and (not self.keep_final_model_state_dict_cpu):
+            raise ValueError(
+                "Final models would be unrebuildable: both final_model_dir is None and "
+                "keep_final_model_state_dict_cpu is False."
+            )
+
         self.outer_splitter = outer_splitter_cls(
-            n_splits=k_outer,
-            shuffle=shuffle_outer,
-            random_state=random_state,
+            n_splits=self.k_outer,
+            shuffle=self.shuffle_outer,
+            random_state=self.random_state,
         )
 
         self.inner_splitter = inner_splitter_cls(
-            n_splits=k_inner,
-            shuffle=shuffle_inner,
-            random_state=random_state,
+            n_splits=self.k_inner,
+            shuffle=self.shuffle_inner,
+            random_state=self.random_state,
         )
 
         if dataloader_factory is None:
@@ -278,6 +362,26 @@ class NestedOptunaSearchCV:
             self.dataloader_factory = dataloader_factory
 
         self._validate_parameter_grid()
+
+    def _selection_metric_name(self) -> str:
+        dataset_evaluator = getattr(self.trainer_spec, "dataset_evaluator", None)
+        if dataset_evaluator is not None:
+            return str(dataset_evaluator.primary_metric)
+        return "val_loss"
+
+    def _selection_metric_direction(self) -> MetricDirection:
+        dataset_evaluator = getattr(self.trainer_spec, "dataset_evaluator", None)
+        if dataset_evaluator is not None:
+            return str(dataset_evaluator.direction)  # type: ignore[return-value]
+        return "minimize"
+
+    def _to_selection_score(self, raw_metric: float) -> float:
+        direction = self._selection_metric_direction()
+        if direction == "maximize":
+            return float(raw_metric)
+        if direction == "minimize":
+            return -float(raw_metric)
+        raise ValueError(f"Unsupported selection metric direction {direction!r}.")
 
     def _validate_parameter_grid(self) -> None:
         model_spec = copy.deepcopy(self.model_spec)
@@ -382,6 +486,17 @@ class NestedOptunaSearchCV:
             model_spec=model_spec,
         )
         return model_spec, trainer_spec, trainer
+    
+    def _split(
+        self,
+        splitter: KFoldSplitter,
+        dataset: TorchkitDataset | Subset,
+        y: Any,
+        groups: Optional[Any] = None,
+    ):
+        if groups is None:
+            return splitter.split(dataset, y)
+        return splitter.split(dataset, y, groups)
 
     def _fit_trial_calibrators(self, model: Any, trial_result: TrialResult) -> None:
         if not self.calibrate:
@@ -400,7 +515,9 @@ class NestedOptunaSearchCV:
                 continue
 
             if task not in trial_result.aggregate_oof_logits or task not in trial_result.aggregate_oof_targets:
-                continue
+                raise ValueError(
+                    f"Calibrator for task {task!r} is active, but aggregate OOF logits/targets are missing."
+                )
 
             logits = trial_result.aggregate_oof_logits[task]
             targets = trial_result.aggregate_oof_targets[task]
@@ -427,23 +544,33 @@ class NestedOptunaSearchCV:
         outer_train_dataset: Subset,
         outer_train_index: Any,
         outer_train_groups: Any,
+        outer_train_original_indices: list[int],
     ) -> TrialResult:
         params = self.suggest_parameters(trial, self.parameter_grid)
         _, _, trainer = self._build_trainer_for_trial(params=params)
 
         inner_results: list[InnerFoldResult] = []
         inner_metrics: list[float] = []
+        inner_selection_scores: list[float] = []
+
         inner_oof_logits_all: list[dict[str, torch.Tensor]] = []
         inner_oof_targets_all: list[dict[str, torch.Tensor]] = []
+        aggregate_oof_sample_indices: list[int] = []
 
-        for inner_fold, (inner_train_idx, inner_val_idx) in enumerate(
-            self.inner_splitter.split(outer_train_dataset, outer_train_index, outer_train_groups)
+        for inner_fold, (inner_train_subset, inner_val_subset) in enumerate(
+            self._split(self.inner_splitter, outer_train_dataset, outer_train_index, outer_train_groups)
         ):
-            train_subset = Subset(outer_train_dataset, inner_train_idx)
-            val_subset = Subset(outer_train_dataset, inner_val_idx)
+            if not isinstance(inner_train_subset, Subset) or not isinstance(inner_val_subset, Subset):
+                raise TypeError(
+                    "KFoldSplitter wrappers are expected to return (Subset, Subset). "
+                    f"Got ({type(inner_train_subset).__name__}, {type(inner_val_subset).__name__})."
+                )
 
-            train_loader = self.dataloader_factory(train_subset, True)
-            val_loader = self.dataloader_factory(val_subset, False)
+            inner_train_original_indices = _resolve_original_indices_for_subset(inner_train_subset)
+            inner_val_original_indices = _resolve_original_indices_for_subset(inner_val_subset)
+
+            train_loader = self.dataloader_factory(inner_train_subset, True)
+            val_loader = self.dataloader_factory(inner_val_subset, False)
 
             trainer.reset_state()
             trainer.fit(
@@ -453,41 +580,69 @@ class NestedOptunaSearchCV:
             )
 
             metric = trainer.state.best_metric
+            if metric is not None:
+                metric = float(metric)
 
             fold_result = InnerFoldResult(
                 fold=inner_fold,
+                inner_train_indices=copy.deepcopy(inner_train_original_indices),
+                inner_val_indices=copy.deepcopy(inner_val_original_indices),
                 best_metric=metric,
                 best_epoch=trainer.state.best_epoch,
                 best_state_dict_cpu=_clone_state_dict_cpu(trainer.state.best_state_dict_cpu),
                 oof_logits=_clone_tensor_dict(trainer.state.oof_logits),
                 oof_targets=_clone_tensor_dict(trainer.state.oof_targets),
+                oof_sample_indices=copy.deepcopy(inner_val_original_indices),
             )
             inner_results.append(fold_result)
 
             if metric is not None:
-                inner_metrics.append(float(metric))
+                inner_metrics.append(metric)
+                inner_selection_scores.append(self._to_selection_score(metric))
 
             if trainer.state.oof_logits:
                 inner_oof_logits_all.append(_clone_tensor_dict(trainer.state.oof_logits))
             if trainer.state.oof_targets:
                 inner_oof_targets_all.append(_clone_tensor_dict(trainer.state.oof_targets))
+            if trainer.state.oof_logits or trainer.state.oof_targets:
+                aggregate_oof_sample_indices.extend(inner_val_original_indices)
 
         if len(inner_metrics) == 0:
             raise ValueError(f"Trial {trial.number} produced no valid inner-fold metrics.")
 
         aggregate_metric = sum(inner_metrics) / len(inner_metrics)
+        aggregate_selection_score = sum(inner_selection_scores) / len(inner_selection_scores)
+
         aggregate_oof_logits = _concat_tensor_dicts(inner_oof_logits_all) if inner_oof_logits_all else {}
         aggregate_oof_targets = _concat_tensor_dicts(inner_oof_targets_all) if inner_oof_targets_all else {}
 
+        # OOF auditability / leakage guard:
+        # if OOF exists, it must cover each outer-train sample exactly once.
+        if aggregate_oof_sample_indices:
+            if len(aggregate_oof_sample_indices) != len(set(aggregate_oof_sample_indices)):
+                raise ValueError(
+                    f"Trial {trial.number} produced duplicated OOF sample indices. "
+                    "This indicates leakage or overlapping inner validation folds."
+                )
+
+            if sorted(aggregate_oof_sample_indices) != sorted(outer_train_original_indices):
+                raise ValueError(
+                    f"Trial {trial.number} produced OOF sample indices that do not exactly cover outer-train. "
+                    "This indicates missing or leaked samples in inner-fold OOF aggregation."
+                )
+
         return TrialResult(
             trial_number=trial.number,
-            params=params,
+            params=copy.deepcopy(params),
             status="SUCCESS",
             aggregate_metric=float(aggregate_metric),
+            aggregate_selection_score=float(aggregate_selection_score),
             inner_results=inner_results,
             aggregate_oof_logits=aggregate_oof_logits,
             aggregate_oof_targets=aggregate_oof_targets,
+            aggregate_oof_sample_indices=copy.deepcopy(aggregate_oof_sample_indices),
             error_message=None,
+            error_traceback=None,
         )
 
     def run(
@@ -498,14 +653,26 @@ class NestedOptunaSearchCV:
     ) -> NestedCVResult:
         outer_results: list[OuterFoldResult] = []
 
-        for outer_fold, (outer_train_idx, outer_test_idx) in enumerate(
-            self.outer_splitter.split(dataset, index, groups)
-        ):
-            outer_train_dataset = Subset(dataset, outer_train_idx)
-            outer_test_dataset = Subset(dataset, outer_test_idx)
+        selection_metric_name = self._selection_metric_name()
+        selection_metric_direction = self._selection_metric_direction()
 
-            outer_train_index = _safe_take(index, outer_train_idx) if index is not None else None
-            outer_train_groups = _safe_take(groups, outer_train_idx) if groups is not None else None
+        for outer_fold, (outer_train_subset, outer_test_subset) in enumerate(
+            self._split(self.outer_splitter, dataset, index, groups)
+        ):
+            if not isinstance(outer_train_subset, Subset) or not isinstance(outer_test_subset, Subset):
+                raise TypeError(
+                    "KFoldSplitter wrappers are expected to return (Subset, Subset). "
+                    f"Got ({type(outer_train_subset).__name__}, {type(outer_test_subset).__name__})."
+                )
+
+            outer_train_dataset = outer_train_subset
+            outer_test_dataset = outer_test_subset
+
+            outer_train_original_indices = _resolve_original_indices_for_subset(outer_train_dataset)
+            outer_test_original_indices = _resolve_original_indices_for_subset(outer_test_dataset)
+
+            outer_train_index = _safe_take(index, outer_train_original_indices) if index is not None else None
+            outer_train_groups = _safe_take(groups, outer_train_original_indices) if groups is not None else None
 
             trial_results: list[TrialResult] = []
 
@@ -533,40 +700,49 @@ class NestedOptunaSearchCV:
                         outer_train_dataset=outer_train_dataset,
                         outer_train_index=outer_train_index,
                         outer_train_groups=outer_train_groups,
+                        outer_train_original_indices=outer_train_original_indices,
                     )
-                    assert trial_result.aggregate_metric is not None
-                    study.tell(trial, trial_result.aggregate_metric)
+                    assert trial_result.aggregate_selection_score is not None
+                    study.tell(trial, trial_result.aggregate_selection_score)
                     trial_results.append(trial_result)
                     successful_trials += 1
 
                 except optuna.TrialPruned as e:
+                    tb = traceback.format_exc()
                     study.tell(trial, state=TrialState.PRUNED)
                     trial_results.append(
                         TrialResult(
                             trial_number=trial.number,
-                            params={},
+                            params=copy.deepcopy(dict(trial.params)),
                             status="PRUNED",
                             aggregate_metric=None,
+                            aggregate_selection_score=None,
                             inner_results=[],
                             aggregate_oof_logits={},
                             aggregate_oof_targets={},
+                            aggregate_oof_sample_indices=[],
                             error_message=str(e),
+                            error_traceback=tb,
                         )
                     )
                     pruned_trials += 1
 
                 except Exception as e:
+                    tb = traceback.format_exc()
                     study.tell(trial, state=TrialState.FAIL)
                     trial_results.append(
                         TrialResult(
                             trial_number=trial.number,
-                            params={},
+                            params=copy.deepcopy(dict(trial.params)),
                             status="FAILED",
                             aggregate_metric=None,
+                            aggregate_selection_score=None,
                             inner_results=[],
                             aggregate_oof_logits={},
                             aggregate_oof_targets={},
+                            aggregate_oof_sample_indices=[],
                             error_message=f"{type(e).__name__}: {e}",
+                            error_traceback=tb,
                         )
                     )
                     failed_trials += 1
@@ -575,8 +751,6 @@ class NestedOptunaSearchCV:
             if len(successful_trial_results) == 0:
                 raise RuntimeError(f"Outer fold {outer_fold} produced no successful trials.")
 
-            best_params = study.best_params
-            best_metric = float(study.best_value)
             best_trial_number = study.best_trial.number
 
             try:
@@ -588,6 +762,13 @@ class NestedOptunaSearchCV:
                     f"Best Optuna trial {best_trial_number} was not found in stored successful trial_results."
                 ) from e
 
+            assert best_trial_result.aggregate_metric is not None
+            assert best_trial_result.aggregate_selection_score is not None
+
+            best_params = copy.deepcopy(best_trial_result.params)
+            best_metric = float(best_trial_result.aggregate_metric)
+            best_selection_score = float(best_trial_result.aggregate_selection_score)
+
             selected_inner_metrics = [
                 float(r.best_metric) for r in best_trial_result.inner_results if r.best_metric is not None
             ]
@@ -595,7 +776,10 @@ class NestedOptunaSearchCV:
                 float(statistics.mean(selected_inner_metrics)) if selected_inner_metrics else None
             )
             selected_inner_metric_std = (
-                float(statistics.stdev(selected_inner_metrics)) if len(selected_inner_metrics) >= 2 else 0.0 if len(selected_inner_metrics) == 1 else None
+                float(statistics.stdev(selected_inner_metrics))
+                if len(selected_inner_metrics) >= 2
+                else 0.0 if len(selected_inner_metrics) == 1
+                else None
             )
             selected_inner_metric_min = (
                 float(min(selected_inner_metrics)) if selected_inner_metrics else None
@@ -638,8 +822,11 @@ class NestedOptunaSearchCV:
             outer_results.append(
                 OuterFoldResult(
                     fold=outer_fold,
-                    best_params=best_params,
+                    outer_train_indices=copy.deepcopy(outer_train_original_indices),
+                    outer_test_indices=copy.deepcopy(outer_test_original_indices),
+                    best_params=copy.deepcopy(best_params),
                     best_metric=best_metric,
+                    best_selection_score=best_selection_score,
                     best_trial_number=best_trial_number,
                     attempted_trials=attempted_trials,
                     successful_trials=successful_trials,
@@ -654,12 +841,35 @@ class NestedOptunaSearchCV:
                     final_model_spec=copy.deepcopy(final_model_spec),
                     final_trainer_spec=copy.deepcopy(final_trainer_spec),
                     final_fit_epochs=final_fit_epochs,
-                    final_best_epoch=None,
-                    final_best_metric=None,
+                    final_epochs_ran=int(final_trainer.state.epoch),
+                    final_best_epoch=final_trainer.state.best_epoch,
+                    final_best_metric=final_trainer.state.best_metric,
+                    final_train_logs=copy.deepcopy(final_trainer.state.train_logs),
+                    final_val_logs=copy.deepcopy(final_trainer.state.val_logs),
+                    final_history=copy.deepcopy(final_trainer.history),
                     final_model_state_dict_cpu=final_model_state_dict_cpu if self.keep_final_model_state_dict_cpu else None,
                     final_model_state_dict_path=final_model_state_dict_path,
-                    test_metrics=test_metrics,
+                    test_metrics=copy.deepcopy(test_metrics),
                 )
             )
 
-        return NestedCVResult(outer_results=outer_results)
+        return NestedCVResult(
+            outer_results=outer_results,
+            base_model_spec=copy.deepcopy(self.model_spec),
+            base_trainer_spec=copy.deepcopy(self.trainer_spec),
+            parameter_grid=copy.deepcopy(self.parameter_grid),
+            outer_splitter_name=self.outer_splitter_cls.__name__,
+            inner_splitter_name=self.inner_splitter_cls.__name__,
+            k_outer=self.k_outer,
+            k_inner=self.k_inner,
+            shuffle_outer=self.shuffle_outer,
+            shuffle_inner=self.shuffle_inner,
+            random_state=self.random_state,
+            n_trials=self.n_trials,
+            max_trial_attempts=self.max_trial_attempts,
+            calibrate=self.calibrate,
+            final_model_dir=self.final_model_dir,
+            keep_final_model_state_dict_cpu=self.keep_final_model_state_dict_cpu,
+            selection_metric_name=selection_metric_name,
+            selection_metric_direction=selection_metric_direction,
+        )

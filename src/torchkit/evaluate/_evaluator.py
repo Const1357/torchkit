@@ -113,9 +113,9 @@ class Evaluator(ABC):
 
         return current
 
-    def _missing_keys(self, inputs: dict[str, Any]) -> list[str]:
+    def _missing_keys(self, inputs: dict[str, Any], required_keys: tuple[str, ...] | None = None) -> list[str]:
         missing: list[str] = []
-        required = set(self.required_keys)
+        required = set(required_keys) if required_keys is not None else set(self.required_keys)
         optional = set(self.optional_keys)
 
         # Optional keys are allowed to be None, but they still must exist in the payload
@@ -131,6 +131,11 @@ class Evaluator(ABC):
                     missing.append(key)
 
         return missing
+    
+    def _validation_required_keys(self) -> tuple[str, ...]:
+        """Handle for subclasses to implement their own required keys validation logic if needed.
+        e.g., fallback of `calibrated_logits` to `logits` if it does not exist."""
+        return self.required_keys
 
     # metric implementation ---
 
@@ -148,7 +153,7 @@ class Evaluator(ABC):
         if not isinstance(inputs, dict):
             raise TypeError(f"Evaluator inputs must be dict[str, Any], got {type(inputs).__name__}.")
 
-        missing = self._missing_keys(inputs)
+        missing = self._missing_keys(inputs=inputs, required_keys=self._validation_required_keys())
         if missing:
             raise KeyError(
                 f"Evaluator '{self.name}' missing required keys: {missing}. "

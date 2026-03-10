@@ -40,7 +40,7 @@ class CalibratorFactory:
                 "Only one of state_dict_path or state_dict may be provided."
             )
 
-        calibrator = spec.cls(**spec.kwargs)
+        calibrator = spec.cls(active=spec.active, **spec.kwargs)
 
         if state_dict is not None:
             calibrator.load_state_dict(state_dict, strict=strict)

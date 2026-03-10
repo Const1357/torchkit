@@ -328,7 +328,10 @@ class Trainer:
 
             if isinstance(self.objective, MultitaskObjective):
                 for o, l in self.objective.per_objective_loss.items():
-                    fl = float(l.detach().item())
+                    if isinstance(l, torch.Tensor):
+                        fl = float(l.detach().item())
+                    else:
+                        fl = float(l)
                     per_objective_sum_loss[o] = per_objective_sum_loss.get(o, 0.0) + fl
 
         if num_batches == 0:

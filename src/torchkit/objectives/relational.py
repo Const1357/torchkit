@@ -30,7 +30,7 @@ class BCELoss(Objective):
         )
 
         self._input_path = input_path
-        self._target_path = f"batch/{target_path}"
+        self._target_path = f"{target_path}"
         self._class_weight = class_weight
 
         self._required_keys = (input_path, target_path)
@@ -74,7 +74,7 @@ class CELoss(Objective):
         )
 
         self._input_path = input_path
-        self._target_path = f"batch/{target_path}"
+        self._target_path = f"{target_path}"
         self._class_weight = class_weight
 
         self._required_keys = (input_path, target_path)
@@ -118,7 +118,7 @@ class MSELoss(Objective):
         )
 
         self._input_path = input_path
-        self._target_path = f"batch/{target_path}"
+        self._target_path = f"{target_path}"
 
         self._required_keys = (input_path, target_path)
 
@@ -180,7 +180,7 @@ class DiceLoss(Objective):
         )
 
         self._logits_path = logits_path
-        self._mask_path = f"batch/{mask_path}"
+        self._mask_path = f"{mask_path}"
 
         self.smooth = float(smooth)
         self.include_background = bool(include_background)
@@ -394,7 +394,7 @@ class SoftDiceLoss(Objective):
             is_optional=is_optional,
         )
         self._logits_path = logits_path
-        self._target_path = f"batch/{target_path}"
+        self._target_path = f"{target_path}"
 
         self.include_background = bool(include_background)
         self.smooth = float(smooth)

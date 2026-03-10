@@ -5,9 +5,10 @@ from typing import Any, Optional, Tuple
 import torch
 
 from torchkit.evaluate._evaluator import Evaluator, MetricDirection
+from torchkit.evaluate._calibrated_logits_fallback_mixin import CalibratedLogitsFallbackMixin
 
 
-class SegmentationEvaluator(Evaluator):
+class SegmentationEvaluator(CalibratedLogitsFallbackMixin, Evaluator):
     """
     Segmentation evaluation.
 
@@ -52,15 +53,6 @@ class SegmentationEvaluator(Evaluator):
         if self.predictions_key is not None:
             keys.append(self.predictions_key)
         return tuple(keys)
-
-    def _resolve_score_tensor(self, inputs: dict[str, Any]) -> torch.Tensor:
-        try:
-            return self.resolve(inputs, self.score_key).detach()
-        except KeyError:
-            if self.score_key.endswith("calibrated_logits"):
-                fallback_key = self.score_key[: -len("calibrated_logits")] + "logits"
-                return self.resolve(inputs, fallback_key).detach()
-            raise
 
     @staticmethod
     def _derive_predictions_from_scores(scores: torch.Tensor) -> tuple[torch.Tensor, int]:
@@ -166,7 +158,7 @@ class SegmentationEvaluator(Evaluator):
         return metrics
 
 
-class Segmentation3DEvaluator(Evaluator):
+class Segmentation3DEvaluator(CalibratedLogitsFallbackMixin, Evaluator):
     """
     3D segmentation evaluator that handles optional masks.
 
@@ -215,15 +207,6 @@ class Segmentation3DEvaluator(Evaluator):
     @property
     def optional_keys(self) -> tuple[str, ...]:
         return (self.target_key,)
-
-    def _resolve_score_tensor(self, inputs: dict[str, Any]) -> torch.Tensor:
-        try:
-            return self.resolve(inputs, self.score_key).detach()
-        except KeyError:
-            if self.score_key.endswith("calibrated_logits"):
-                fallback_key = self.score_key[: -len("calibrated_logits")] + "logits"
-                return self.resolve(inputs, fallback_key).detach()
-            raise
 
     @staticmethod
     def _derive_predictions_from_scores(scores: torch.Tensor) -> tuple[torch.Tensor, int]:

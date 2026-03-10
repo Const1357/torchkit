@@ -19,17 +19,18 @@ from torch.utils.data import Subset
 
 def train_test_split(
     dataset: TorchkitDataset,
-    index: Any,
     test_size: float = 0.2,
     shuffle: bool = True,
     random_state: Optional[int] = None,
+    stratify: Optional[Any] = None,
 ):
     """Wrapper around `sklearn.model_selection.train_test_split` that returns the split Subsets of the original dataset."""
     train_idx, test_idx = sklearn_train_test_split(
-        range(len(index)),
+        np.arange(len(dataset)),
         test_size=test_size,
         shuffle=shuffle,
         random_state=random_state,
+        stratify=stratify,
     )
 
     return Subset(dataset, train_idx), Subset(dataset, test_idx)
@@ -51,7 +52,7 @@ class KFoldSplitter(ABC):
         self.random_state = random_state
 
     @abstractmethod
-    def split(self, dataset: TorchkitDataset, index: Any, groups: Optional[Any] = None):
+    def split(self, dataset: TorchkitDataset, y: Any, groups: Optional[Any] = None):
         """Split the dataset into training and validation sets."""
         raise NotImplementedError("Subclasses must implement this method.")
         
@@ -63,16 +64,18 @@ class GroupKFold(KFoldSplitter):
         super().__init__(n_splits=n_splits, shuffle=shuffle, random_state=random_state)
 
     @final
-    def split(self, dataset: TorchkitDataset, index: Any, groups: Any) -> Iterator[Tuple[Subset, Subset]]:
-        
-        gkf = SklearnGroupKFold(
-            n_splits=self.n_splits,
-            shuffle=self.shuffle,
-            random_state=self.random_state,
-        )  
+    def split(self, dataset: TorchkitDataset, y: Any, groups: Any) -> Iterator[Tuple[Subset, Subset]]:
+        kwargs = {"n_splits": self.n_splits}
+        if self.shuffle:
+            kwargs["shuffle"] = self.shuffle
+            kwargs["random_state"] = self.random_state
+        else:
+            kwargs["shuffle"] = self.shuffle
 
-        dummy_X = np.arange(len(index))  # dummy X, not used in splitting
-        for train_idx, val_idx in gkf.split(dummy_X, index, groups):
+        gkf = SklearnGroupKFold(**kwargs)
+
+        dummy_X = np.arange(len(y))
+        for train_idx, val_idx in gkf.split(dummy_X, y, groups):
             yield Subset(dataset, train_idx), Subset(dataset, val_idx)
 
 class StratifiedKFold(KFoldSplitter):
@@ -82,16 +85,18 @@ class StratifiedKFold(KFoldSplitter):
         super().__init__(n_splits=n_splits, shuffle=shuffle, random_state=random_state)
 
     @final
-    def split(self, dataset: TorchkitDataset, index: Any) -> Iterator[Tuple[Subset, Subset]]:
-        
-        skf = SklearnStratifiedKFold(
-            n_splits=self.n_splits,
-            shuffle=self.shuffle,
-            random_state=self.random_state,
-        )  
+    def split(self, dataset: TorchkitDataset, y: Any) -> Iterator[Tuple[Subset, Subset]]:
+        kwargs = {"n_splits": self.n_splits}
+        if self.shuffle:
+            kwargs["shuffle"] = self.shuffle
+            kwargs["random_state"] = self.random_state
+        else:
+            kwargs["shuffle"] = self.shuffle
 
-        dummy_X = np.arange(len(index))  # dummy X, not used in splitting
-        for train_idx, val_idx in skf.split(dummy_X, index):
+        skf = SklearnStratifiedKFold(**kwargs)
+
+        dummy_X = np.arange(len(y))
+        for train_idx, val_idx in skf.split(dummy_X, y):
             yield Subset(dataset, train_idx), Subset(dataset, val_idx)
 
 
@@ -102,14 +107,16 @@ class StratifiedGroupKFold(KFoldSplitter):
         super().__init__(n_splits=n_splits, shuffle=shuffle, random_state=random_state)
 
     @final
-    def split(self, dataset: TorchkitDataset, index: Any, groups: Any) -> Iterator[Tuple[Subset, Subset]]:
-        
-        sgkf = SklearnStratifiedGroupKFold(
-            n_splits=self.n_splits,
-            shuffle=self.shuffle,
-            random_state=self.random_state,
-        )  
+    def split(self, dataset: TorchkitDataset, y: Any, groups: Any) -> Iterator[Tuple[Subset, Subset]]:
+        kwargs = {"n_splits": self.n_splits}
+        if self.shuffle:
+            kwargs["shuffle"] = self.shuffle
+            kwargs["random_state"] = self.random_state
+        else:
+            kwargs["shuffle"] = self.shuffle
 
-        dummy_X = np.arange(len(index))  # dummy X, not used in splitting
-        for train_idx, val_idx in sgkf.split(dummy_X, index, groups):
+        sgkf = SklearnStratifiedGroupKFold(**kwargs)
+
+        dummy_X = np.arange(len(y))
+        for train_idx, val_idx in sgkf.split(dummy_X, y, groups):
             yield Subset(dataset, train_idx), Subset(dataset, val_idx)

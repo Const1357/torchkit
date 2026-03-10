@@ -5,9 +5,10 @@ from typing import Any, Optional
 import torch
 
 from torchkit.evaluate._evaluator import Evaluator, MetricDirection
+from torchkit.evaluate._calibrated_logits_fallback_mixin import CalibratedLogitsFallbackMixin
 
 
-class ROCBinaryEvaluator(Evaluator):
+class ROCBinaryEvaluator(CalibratedLogitsFallbackMixin, Evaluator):
     """
     Binary ROC evaluation.
 
@@ -51,15 +52,6 @@ class ROCBinaryEvaluator(Evaluator):
         if self.probabilities_key is not None:
             keys.append(self.probabilities_key)
         return tuple(keys)
-
-    def _resolve_score_tensor(self, inputs: dict[str, Any]) -> torch.Tensor:
-        try:
-            return self.resolve(inputs, self.score_key).detach()
-        except KeyError:
-            if self.score_key.endswith("calibrated_logits"):
-                fallback_key = self.score_key[: -len("calibrated_logits")] + "logits"
-                return self.resolve(inputs, fallback_key).detach()
-            raise
 
     @staticmethod
     def _binary_positive_probability(x: torch.Tensor) -> torch.Tensor:

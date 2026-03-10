@@ -102,6 +102,13 @@ class Backbone(nn.Module, ABC):
 
         out_keys = set(out.keys())
 
+        extra = out_keys - set(requested_features)
+        if extra:
+            raise KeyError(
+                f"{self.__class__.__name__} returned unrequested features {sorted(extra)}. "
+                f"Requested: {sorted(requested_features)}."
+            )
+
         # Safety: prevent backbones from inventing keys
         unknown = out_keys - self._supported_features
         if unknown:
