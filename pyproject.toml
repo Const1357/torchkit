@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sktorch"
+name = "torchkit"
 version = "0.1.0"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 
 # Add runtime deps that your package imports at import-time.
 dependencies = [

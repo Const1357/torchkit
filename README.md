@@ -1,1 +1,1 @@
-# sktorch - minimal ML utilities with scikit-learn compatibility
+# torchkit - torch-native ML modules
