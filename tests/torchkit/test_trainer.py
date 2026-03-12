@@ -8,7 +8,7 @@ import torch
 from torch import Tensor, nn
 from torch.utils.data import DataLoader, Dataset
 
-from torchkit.train.trainer import Trainer, TrainerConfig
+from torchkit.train.trainer import Trainer, TrainerConfig, _move_to_device
 from torchkit.models.Model._model import TorchkitModel
 from torchkit.models.backbone._backbone import Backbone
 from torchkit.models.head._task_head import TaskHead
@@ -829,3 +829,379 @@ def test_trainer_can_load_initial_state_from_path(train_loader: DataLoader, tmp_
     saved_sd = torch.load(init_path, map_location="cpu")
     for k in saved_sd:
         assert torch.allclose(saved_sd[k], reloaded_sd[k])
+
+class NestedBatchDataset(Dataset):
+    def __len__(self):
+        return 4
+
+    def __getitem__(self, idx):
+        return {
+            "x": torch.randn(3),
+            "nested": {
+                "a": torch.randn(2),
+                "b": [torch.randn(1), (torch.randn(1), "text")]
+            },
+            "y": torch.tensor(idx % 2)
+        }
+
+
+def test_move_to_device_nested_structures():
+    model = nn.Linear(3, 2)
+    objective = CELoss(input_path="clf/logits", target_path="batch/y")
+
+    trainer = Trainer(
+        model=model,
+        objective=objective,
+        config=TrainerConfig(device="cpu")
+    )
+
+    batch = NestedBatchDataset()[0]
+    moved = _move_to_device(batch, device="cpu")
+
+    assert isinstance(moved["nested"]["b"][0], torch.Tensor)
+    assert moved["nested"]["b"][1][1] == "text"
+
+
+# -------------------------------------------------------------------
+# set_params branches
+# -------------------------------------------------------------------
+
+def test_set_params_rebuilds_scaler():
+    model = nn.Linear(3, 2)
+    objective = CELoss(input_path="clf/logits", target_path="batch/y")
+
+    trainer = Trainer(
+        model=model,
+        objective=objective,
+        config=TrainerConfig(device="cpu", use_amp=False)
+    )
+
+    old_scaler = trainer._scaler
+
+    trainer.set_params(use_amp=True)
+
+    assert trainer._scaler is not old_scaler
+
+
+def test_set_params_remove_scheduler():
+    model = nn.Linear(3, 2)
+    objective = CELoss(input_path="clf/logits", target_path="batch/y")
+
+    trainer = Trainer(
+        model=model,
+        objective=objective,
+        config=TrainerConfig(device="cpu")
+    )
+
+    trainer.set_params(scheduler_cls=None)
+
+    assert trainer.scheduler is None
+
+
+# -------------------------------------------------------------------
+# reset_state branches
+# -------------------------------------------------------------------
+
+def test_reset_state_config_and_history():
+    model = nn.Linear(3, 2)
+    objective = CELoss(input_path="clf/logits", target_path="batch/y")
+
+    trainer = Trainer(
+        model=model,
+        objective=objective,
+        config=TrainerConfig(device="cpu")
+    )
+
+    trainer.history.append({"train_loss": 1.0})
+
+    trainer.reset_state(reset_config=True, clear_history=False)
+
+    assert len(trainer.history) == 1
+
+
+# -------------------------------------------------------------------
+# Validation input guards
+# -------------------------------------------------------------------
+
+class NonTensorXDataset(Dataset):
+    def __len__(self):
+        return 4
+
+    def __getitem__(self, idx):
+        return {"x": "not_tensor", "y": torch.tensor(1)}
+
+
+class ScalarXDataset(Dataset):
+    def __len__(self):
+        return 4
+
+    def __getitem__(self, idx):
+        return {"x": torch.tensor(1.0), "y": torch.tensor(1)}
+
+
+def make_loader(dataset):
+    return DataLoader(dataset, batch_size=2)
+
+
+def test_validate_rejects_non_tensor_x():
+    model = nn.Linear(3, 2)
+    objective = CELoss(input_path="clf/logits", target_path="batch/y")
+
+    trainer = Trainer(
+        model=model,
+        objective=objective,
+        config=TrainerConfig(device="cpu")
+    )
+
+    loader = make_loader(NonTensorXDataset())
+
+    try:
+        trainer._validate_one_epoch(loader, epoch=1)
+    except TypeError:
+        pass
+    else:
+        assert False
+
+
+# -------------------------------------------------------------------
+# Calibration target discovery branches
+# -------------------------------------------------------------------
+
+class NestedTargetDataset(Dataset):
+    def __len__(self):
+        return 4
+
+    def __getitem__(self, idx):
+        return {
+            "x": torch.randn(3),
+            "clf": {"y": torch.tensor(idx % 2)}
+        }
+
+
+class NonTensorXDataset(Dataset):
+    def __len__(self) -> int:
+        return 4
+
+    def __getitem__(self, idx: int) -> dict[str, object]:
+        return {
+            "x": f"sample-{idx}",
+            "y": torch.tensor(idx % 2, dtype=torch.long),
+        }
+
+
+class ScalarXDataset(Dataset):
+    def __len__(self) -> int:
+        return 4
+
+    def __getitem__(self, idx: int) -> dict[str, Tensor]:
+        return {
+            "x": torch.tensor(float(idx), dtype=torch.float32),
+            "y": torch.tensor(idx % 2, dtype=torch.long),
+        }
+
+
+class NestedCalibrationTargetDataset(Dataset):
+    def __len__(self) -> int:
+        return 6
+
+    def __getitem__(self, idx: int) -> dict[str, object]:
+        y = torch.tensor(idx % 2, dtype=torch.long)
+        x = (
+            torch.tensor([2.0, 0.0, 0.0], dtype=torch.float32)
+            if idx % 2 == 0
+            else torch.tensor([0.0, 2.0, 0.0], dtype=torch.float32)
+        )
+        return {
+            "x": x,
+            "target": y,
+            "clf": {"y": y},
+        }
+
+
+class FlatCalibrationTargetDataset(Dataset):
+    def __len__(self) -> int:
+        return 6
+
+    def __getitem__(self, idx: int) -> dict[str, object]:
+        y = torch.tensor(idx % 2, dtype=torch.long)
+        x = (
+            torch.tensor([2.0, 0.0, 0.0], dtype=torch.float32)
+            if idx % 2 == 0
+            else torch.tensor([0.0, 2.0, 0.0], dtype=torch.float32)
+        )
+        return {
+            "x": x,
+            "target": y,
+            "clf/y": y,
+        }
+
+
+def test_move_to_device_recurses_into_nested_structures():
+    nested = {
+        "a": torch.tensor([1.0]),
+        "b": [torch.tensor([2.0]), (torch.tensor([3.0]), "x")],
+        "c": 7,
+    }
+
+    moved = _move_to_device(nested, torch.device("cpu"))
+
+    assert moved["a"].device.type == "cpu"
+    assert moved["b"][0].device.type == "cpu"
+    assert moved["b"][1][0].device.type == "cpu"
+    assert moved["b"][1][1] == "x"
+    assert moved["c"] == 7
+
+
+def test_trainer_set_params_use_amp_rebuilds_scaler(trainer: Trainer):
+    old_scaler = trainer._scaler
+
+    trainer.set_params(use_amp=True)
+
+    assert trainer.config.use_amp is True
+    assert trainer._scaler is not old_scaler
+    assert trainer._scaler.is_enabled() is False
+
+
+def test_trainer_set_params_scheduler_cls_none_removes_scheduler(
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+):
+    model = make_classification_model(with_prediction_head=False)
+    objective = CELoss(
+        input_path="clf/logits",
+        target_path="batch/y",
+        reduction="mean",
+    )
+    trainer = Trainer(
+        model=model,
+        objective=objective,
+        config=TrainerConfig(
+            device="cpu",
+            max_epochs=1,
+            optimizer_cls=torch.optim.SGD,
+            optimizer_kwargs={"lr": 0.1},
+            scheduler_cls=torch.optim.lr_scheduler.StepLR,
+            scheduler_kwargs={"step_size": 1, "gamma": 0.5},
+        ),
+    )
+
+    trainer.fit(train_loader, val_loader)
+    assert trainer.scheduler is not None
+
+    trainer.set_params(scheduler_cls=None)
+
+    assert trainer.scheduler is None
+
+
+def test_trainer_reset_state_with_reset_config_preserves_history_when_requested(
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+):
+    model = make_classification_model(with_prediction_head=False)
+    objective = CELoss(
+        input_path="clf/logits",
+        target_path="batch/y",
+        reduction="mean",
+    )
+    trainer = Trainer(
+        model=model,
+        objective=objective,
+        config=TrainerConfig(
+            device="cpu",
+            max_epochs=1,
+            optimizer_cls=torch.optim.SGD,
+            optimizer_kwargs={"lr": 0.1},
+        ),
+    )
+
+    trainer.set_params(max_epochs=7, optimizer_kwargs={"lr": 0.02})
+    trainer.fit(train_loader, val_loader)
+    assert len(trainer.history) == 1
+
+    trainer.reset_state(reset_config=True, clear_history=False)
+
+    assert trainer.config.max_epochs == trainer._base_config.max_epochs
+    assert trainer.config.optimizer_kwargs == trainer._base_config.optimizer_kwargs
+    assert len(trainer.history) == 1
+    assert trainer.state.train_logs == []
+    assert trainer.state.val_logs == []
+
+
+def test_validate_one_epoch_rejects_non_tensor_x():
+    model = make_classification_model(with_prediction_head=False)
+    objective = CELoss(
+        input_path="clf/logits",
+        target_path="batch/y",
+        reduction="mean",
+    )
+    trainer = Trainer(
+        model=model,
+        objective=objective,
+        config=TrainerConfig(device="cpu"),
+    )
+
+    loader = DataLoader(NonTensorXDataset(), batch_size=None)
+
+    with pytest.raises(TypeError, match=r"'x' is supposed to be a Tensor"):
+        trainer._validate_one_epoch(loader, epoch=1)
+
+
+def test_validate_one_epoch_rejects_scalar_x():
+    model = make_classification_model(with_prediction_head=False)
+    objective = CELoss(
+        input_path="clf/logits",
+        target_path="batch/y",
+        reduction="mean",
+    )
+    trainer = Trainer(
+        model=model,
+        objective=objective,
+        config=TrainerConfig(device="cpu"),
+    )
+
+    loader = DataLoader(ScalarXDataset(), batch_size=None)
+
+    with pytest.raises(ValueError, match=r"batch\['x'\] is scalar"):
+        trainer._validate_one_epoch(loader, epoch=1)
+
+
+def test_validate_oof_targets_found_in_nested_task_dict():
+    model = make_classification_model(with_prediction_head=True)
+    objective = CELoss(
+        input_path="clf/logits",
+        target_path="batch/target",
+        reduction="mean",
+    )
+    trainer = Trainer(
+        model=model,
+        objective=objective,
+        config=TrainerConfig(device="cpu", max_epochs=1),
+    )
+
+    loader = DataLoader(NestedCalibrationTargetDataset(), batch_size=2, shuffle=False)
+    log = trainer._validate_one_epoch(loader, epoch=1)
+
+    assert "val_loss" in log
+    assert "clf" in trainer.state.oof_targets
+    assert trainer.state.oof_targets["clf"].shape[0] == len(loader.dataset)
+
+
+def test_validate_oof_targets_found_in_flat_task_key():
+    model = make_classification_model(with_prediction_head=True)
+    objective = CELoss(
+        input_path="clf/logits",
+        target_path="batch/target",
+        reduction="mean",
+    )
+    trainer = Trainer(
+        model=model,
+        objective=objective,
+        config=TrainerConfig(device="cpu", max_epochs=1),
+    )
+
+    loader = DataLoader(FlatCalibrationTargetDataset(), batch_size=2, shuffle=False)
+    log = trainer._validate_one_epoch(loader, epoch=1)
+
+    assert "val_loss" in log
+    assert "clf" in trainer.state.oof_targets
+    assert trainer.state.oof_targets["clf"].shape[0] == len(loader.dataset)

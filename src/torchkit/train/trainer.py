@@ -382,7 +382,7 @@ class Trainer:
                 raise KeyError("Expected batch to contain a Tensor 'x' key for primary model input, but it was not found. Cannot infer batch size.")
 
             if not torch.is_tensor(x):
-                raise KeyError(f"'x' is supposed to be a Tensor for primary model input, but got {type(x).__name__}. Cannot infer batch size.")
+                raise TypeError(f"'x' is supposed to be a Tensor for primary model input, but got {type(x).__name__}. Cannot infer batch size.")
             else:
                 if x.ndim == 0:
                     raise ValueError("batch['x'] is scalar; cannot infer batch size.")
