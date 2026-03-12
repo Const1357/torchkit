@@ -1,0 +1,398 @@
+from __future__ import annotations
+import os
+
+from typing import Any, Optional
+
+import copy
+import statistics
+import traceback
+
+import optuna
+from optuna.trial import TrialState
+import torch
+from torch.utils.data import Subset
+
+from torchkit.data._dataset import TorchkitDataset
+from torchkit.train.cv._base_cv import (
+    _clone_state_dict_cpu,
+    _clone_tensor_dict,
+    _concat_tensor_dicts,
+    _resolve_original_indices_for_subset,
+    _safe_take,
+)
+from torchkit.train.cv._base_search_cv import BaseSearchCV
+from torchkit.train.cv._optuna_results import (
+    FoldResult,
+    OptunaSearchCVResult,
+    OptunaTrialResult,
+)
+from torchkit.train.cv._optuna_search_mixin import (
+    OptunaSearchMixin,
+    SuggestionType,
+)
+from torchkit.train.trainer import Trainer
+
+
+class OptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
+    """
+    Reusable single-study Optuna CV engine.
+
+    This is the core search primitive:
+    - one study
+    - one CV splitter
+    - one training/search pool
+    - optional final refit on the full search pool
+    - optional holdout evaluation
+
+    NestedOptunaSearchCV composes this engine inside its outer loop.
+    """
+
+    def __init__(
+        self,
+        *,
+        model_spec,
+        trainer_spec,
+        parameter_grid: dict[str, tuple[list, SuggestionType]],
+        splitter_cls,
+        dataloader_factory=None,
+        n_trials: int = 10,
+        max_trial_attempts: Optional[int] = None,
+        n_splits: int = 5,
+        shuffle: bool = False,
+        random_state: Optional[int] = None,
+        calibrate: bool = True,
+        final_model_dir: Optional[str] = None,
+        keep_final_model_state_dict_cpu: bool = True,
+    ):
+        super().__init__(
+            model_spec=model_spec,
+            trainer_spec=trainer_spec,
+            parameter_grid=parameter_grid,
+            outer_splitter_cls=splitter_cls,
+            inner_splitter_cls=None,
+            dataloader_factory=dataloader_factory,
+            n_trials=n_trials,
+            max_trial_attempts=max_trial_attempts,
+            k_outer=n_splits,
+            k_inner=None,
+            shuffle_outer=shuffle,
+            shuffle_inner=False,
+            random_state=random_state,
+            calibrate=calibrate,
+            final_model_dir=final_model_dir,
+            keep_final_model_state_dict_cpu=keep_final_model_state_dict_cpu,
+        )
+
+    def _run_single_trial(
+        self,
+        *,
+        trial: optuna.Trial,
+        search_dataset: TorchkitDataset | Subset,
+        search_index: Any,
+        search_groups: Any,
+        search_original_indices: list[int],
+    ) -> OptunaTrialResult:
+        params = self.suggest_parameters(trial, self.parameter_grid)
+        _, _, trainer = self._build_trainer_for_trial(params=params)
+
+        fold_results: list[FoldResult] = []
+        fold_metrics: list[float] = []
+        fold_selection_scores: list[float] = []
+
+        fold_oof_logits_all: list[dict[str, torch.Tensor]] = []
+        fold_oof_targets_all: list[dict[str, torch.Tensor]] = []
+        aggregate_oof_sample_indices: list[int] = []
+
+        for fold, (train_subset, val_subset) in enumerate(
+            self._split(self.outer_splitter, search_dataset, search_index, search_groups)
+        ):
+            if not isinstance(train_subset, Subset) or not isinstance(val_subset, Subset):
+                raise TypeError(
+                    "KFoldSplitter wrappers are expected to return (Subset, Subset). "
+                    f"Got ({type(train_subset).__name__}, {type(val_subset).__name__})."
+                )
+
+            train_original_indices = _resolve_original_indices_for_subset(train_subset)
+            val_original_indices = _resolve_original_indices_for_subset(val_subset)
+
+            train_loader = self.dataloader_factory(train_subset, True)
+            val_loader = self.dataloader_factory(val_subset, False)
+
+            trainer.reset_state()
+            trainer.fit(
+                train_loader,
+                val_loader,
+                trial=None,
+            )
+
+            metric = trainer.state.best_metric
+            if metric is not None:
+                metric = float(metric)
+
+            fold_result = FoldResult(
+                fold=fold,
+                train_indices=copy.deepcopy(train_original_indices),
+                val_indices=copy.deepcopy(val_original_indices),
+                best_metric=metric,
+                best_epoch=trainer.state.best_epoch,
+                best_state_dict_cpu=_clone_state_dict_cpu(trainer.state.best_state_dict_cpu),
+                oof_logits=_clone_tensor_dict(trainer.state.oof_logits),
+                oof_targets=_clone_tensor_dict(trainer.state.oof_targets),
+                oof_sample_indices=copy.deepcopy(val_original_indices),
+            )
+            fold_results.append(fold_result)
+
+            if metric is not None:
+                fold_metrics.append(metric)
+                fold_selection_scores.append(self._to_selection_score(metric))
+
+            if trainer.state.oof_logits:
+                fold_oof_logits_all.append(_clone_tensor_dict(trainer.state.oof_logits))
+            if trainer.state.oof_targets:
+                fold_oof_targets_all.append(_clone_tensor_dict(trainer.state.oof_targets))
+            if trainer.state.oof_logits or trainer.state.oof_targets:
+                aggregate_oof_sample_indices.extend(val_original_indices)
+
+        if len(fold_metrics) == 0:
+            raise ValueError(f"Trial {trial.number} produced no valid fold metrics.")
+
+        aggregate_metric = sum(fold_metrics) / len(fold_metrics)
+        aggregate_selection_score = sum(fold_selection_scores) / len(fold_selection_scores)
+
+        aggregate_oof_logits = _concat_tensor_dicts(fold_oof_logits_all) if fold_oof_logits_all else {}
+        aggregate_oof_targets = _concat_tensor_dicts(fold_oof_targets_all) if fold_oof_targets_all else {}
+
+        self._assert_exact_oof_coverage(
+            sample_indices=aggregate_oof_sample_indices,
+            reference_indices=search_original_indices,
+            context=f"Trial {trial.number}",
+        )
+
+        return OptunaTrialResult(
+            trial_number=trial.number,
+            params=copy.deepcopy(params),
+            status="SUCCESS",
+            aggregate_metric=float(aggregate_metric),
+            aggregate_selection_score=float(aggregate_selection_score),
+            fold_results=fold_results,
+            aggregate_oof_logits=aggregate_oof_logits,
+            aggregate_oof_targets=aggregate_oof_targets,
+            aggregate_oof_sample_indices=copy.deepcopy(aggregate_oof_sample_indices),
+            error_message=None,
+            error_traceback=None,
+        )
+
+    def run(
+        self,
+        dataset: TorchkitDataset | Subset,
+        index: Any = None,
+        groups: Optional[Any] = None,
+        *,
+        holdout_dataset: Optional[TorchkitDataset | Subset] = None,
+    ) -> OptunaSearchCVResult:
+        if isinstance(dataset, Subset):
+            search_original_indices = _resolve_original_indices_for_subset(dataset)
+        else:
+            search_original_indices = list(range(len(dataset)))
+
+        search_index = _safe_take(index, search_original_indices) if index is not None else None
+        search_groups = _safe_take(groups, search_original_indices) if groups is not None else None
+
+        selection_metric_name = self._selection_metric_name()
+        selection_metric_direction = self._selection_metric_direction()
+
+        trial_results: list[OptunaTrialResult] = []
+
+        study = self._create_study()
+
+        attempted_trials = 0
+        successful_trials = 0
+        failed_trials = 0
+        pruned_trials = 0
+
+        while successful_trials < self.n_trials:
+            if attempted_trials >= self.max_trial_attempts:
+                raise RuntimeError(
+                    f"Reached max_trial_attempts={self.max_trial_attempts} before obtaining "
+                    f"{self.n_trials} successful trials. "
+                    f"Successful={successful_trials}, failed={failed_trials}, pruned={pruned_trials}."
+                )
+
+            trial = study.ask()
+            attempted_trials += 1
+
+            try:
+                trial_result = self._run_single_trial(
+                    trial=trial,
+                    search_dataset=dataset,
+                    search_index=search_index,
+                    search_groups=search_groups,
+                    search_original_indices=search_original_indices,
+                )
+                assert trial_result.aggregate_selection_score is not None
+                study.tell(trial, trial_result.aggregate_selection_score)
+                trial_results.append(trial_result)
+                successful_trials += 1
+
+            except optuna.TrialPruned as e:
+                tb = traceback.format_exc()
+                study.tell(trial, state=TrialState.PRUNED)
+                trial_results.append(
+                    OptunaTrialResult(
+                        trial_number=trial.number,
+                        params=copy.deepcopy(dict(trial.params)),
+                        status="PRUNED",
+                        aggregate_metric=None,
+                        aggregate_selection_score=None,
+                        fold_results=[],
+                        aggregate_oof_logits={},
+                        aggregate_oof_targets={},
+                        aggregate_oof_sample_indices=[],
+                        error_message=str(e),
+                        error_traceback=tb,
+                    )
+                )
+                pruned_trials += 1
+
+            except Exception as e:
+                tb = traceback.format_exc()
+                study.tell(trial, state=TrialState.FAIL)
+                trial_results.append(
+                    OptunaTrialResult(
+                        trial_number=trial.number,
+                        params=copy.deepcopy(dict(trial.params)),
+                        status="FAILED",
+                        aggregate_metric=None,
+                        aggregate_selection_score=None,
+                        fold_results=[],
+                        aggregate_oof_logits={},
+                        aggregate_oof_targets={},
+                        aggregate_oof_sample_indices=[],
+                        error_message=f"{type(e).__name__}: {e}",
+                        error_traceback=tb,
+                    )
+                )
+                failed_trials += 1
+
+        successful_trial_results = [tr for tr in trial_results if tr.status == "SUCCESS"]
+        if len(successful_trial_results) == 0:
+            raise RuntimeError("OptunaSearchCV produced no successful trials.")
+
+        best_trial_number = study.best_trial.number
+
+        try:
+            best_trial_result = next(
+                tr for tr in successful_trial_results if tr.trial_number == best_trial_number
+            )
+        except StopIteration as e:
+            raise RuntimeError(
+                f"Best Optuna trial {best_trial_number} was not found in stored successful trial_results."
+            ) from e
+
+        assert best_trial_result.aggregate_metric is not None
+        assert best_trial_result.aggregate_selection_score is not None
+
+        best_params = copy.deepcopy(best_trial_result.params)
+        best_metric = float(best_trial_result.aggregate_metric)
+        best_selection_score = float(best_trial_result.aggregate_selection_score)
+
+        selected_fold_metrics = [
+            float(r.best_metric) for r in best_trial_result.fold_results if r.best_metric is not None
+        ]
+        selected_metric_mean = (
+            float(statistics.mean(selected_fold_metrics)) if selected_fold_metrics else None
+        )
+        selected_metric_std = (
+            float(statistics.stdev(selected_fold_metrics))
+            if len(selected_fold_metrics) >= 2
+            else 0.0 if len(selected_fold_metrics) == 1
+            else None
+        )
+        selected_metric_min = (
+            float(min(selected_fold_metrics)) if selected_fold_metrics else None
+        )
+        selected_metric_max = (
+            float(max(selected_fold_metrics)) if selected_fold_metrics else None
+        )
+
+        final_model_spec, final_trainer_spec, final_trainer = self._build_trainer_for_trial(params=best_params)
+        search_loader = self.dataloader_factory(dataset, True)
+
+        fold_best_epochs = [r.best_epoch for r in best_trial_result.fold_results if r.best_epoch is not None]
+        final_fit_epochs = (
+            int(statistics.median(fold_best_epochs))
+            if fold_best_epochs
+            else int(final_trainer.config.max_epochs)
+        )
+
+        final_trainer.fit(
+            search_loader,
+            val_loader=None,
+            reset_state=True,
+            max_epochs=final_fit_epochs,
+            early_stopping_patience=None,
+        )
+
+        self._fit_calibrators_from_oof(
+            final_trainer.model,
+            oof_logits=best_trial_result.aggregate_oof_logits,
+            oof_targets=best_trial_result.aggregate_oof_targets,
+        )
+
+        holdout_metrics = None
+        if holdout_dataset is not None:
+            holdout_metrics = self._evaluate_holdout(final_trainer, holdout_dataset)
+
+        final_model_state_dict_cpu = final_trainer._get_model_state_dict_cpu()
+        final_model_state_dict_path = None
+
+        if self.final_model_dir is not None:
+            final_model_state_dict_path = os.path.join(
+                self.final_model_dir,
+                "final_model.pt",
+            )
+            torch.save(final_model_state_dict_cpu, final_model_state_dict_path)
+
+        return OptunaSearchCVResult(
+            search_pool_indices=copy.deepcopy(search_original_indices),
+            trial_results=trial_results,
+            best_params=best_params,
+            best_metric=best_metric,
+            best_selection_score=best_selection_score,
+            best_trial_number=best_trial_number,
+            attempted_trials=attempted_trials,
+            successful_trials=successful_trials,
+            failed_trials=failed_trials,
+            pruned_trials=pruned_trials,
+            selected_fold_results=copy.deepcopy(best_trial_result.fold_results),
+            selected_metric_mean=selected_metric_mean,
+            selected_metric_std=selected_metric_std,
+            selected_metric_min=selected_metric_min,
+            selected_metric_max=selected_metric_max,
+            final_model_spec=copy.deepcopy(final_model_spec),
+            final_trainer_spec=copy.deepcopy(final_trainer_spec),
+            final_fit_epochs=final_fit_epochs,
+            final_epochs_ran=int(final_trainer.state.epoch),
+            final_best_epoch=final_trainer.state.best_epoch,
+            final_best_metric=final_trainer.state.best_metric,
+            final_train_logs=copy.deepcopy(final_trainer.state.train_logs),
+            final_val_logs=copy.deepcopy(final_trainer.state.val_logs),
+            final_history=copy.deepcopy(final_trainer.history),
+            final_model_state_dict_cpu=final_model_state_dict_cpu if self.keep_final_model_state_dict_cpu else None,
+            final_model_state_dict_path=final_model_state_dict_path,
+            holdout_metrics=copy.deepcopy(holdout_metrics),
+            base_model_spec=copy.deepcopy(self.model_spec),
+            base_trainer_spec=copy.deepcopy(self.trainer_spec),
+            parameter_grid=copy.deepcopy(self.parameter_grid),
+            splitter_name=self.outer_splitter_cls.__name__,
+            n_splits=self.k_outer,
+            shuffle=self.shuffle_outer,
+            random_state=self.random_state,
+            n_trials=self.n_trials,
+            max_trial_attempts=self.max_trial_attempts,
+            calibrate=self.calibrate,
+            final_model_dir=self.final_model_dir,
+            keep_final_model_state_dict_cpu=self.keep_final_model_state_dict_cpu,
+            selection_metric_name=selection_metric_name,
+            selection_metric_direction=selection_metric_direction,
+        )
