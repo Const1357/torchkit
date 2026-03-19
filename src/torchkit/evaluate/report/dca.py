@@ -4,11 +4,11 @@ from typing import Any, Optional
 
 import torch
 
-from torchkit.evaluate._evaluator import Evaluator, MetricDirection
-from torchkit.evaluate._calibrated_logits_fallback_mixin import CalibratedLogitsFallbackMixin
+from torchkit.evaluate.report._report_evaluator import ReportEvaluator
+from torchkit.evaluate.mixins._calibrated_logits_fallback_mixin import CalibratedLogitsFallbackMixin
 
 
-class DCAEvaluator(CalibratedLogitsFallbackMixin, Evaluator):
+class DCAReportEvaluator(CalibratedLogitsFallbackMixin, ReportEvaluator):
     """
     Decision Curve Analysis (DCA).
 
@@ -31,17 +31,9 @@ class DCAEvaluator(CalibratedLogitsFallbackMixin, Evaluator):
         target_key: str,
         probabilities_key: Optional[str] = None,
         name: str = "dca",
-        primary_metric: str = "max_net_benefit",
-        direction: MetricDirection = "maximize",
-        weight: float = 1.0,
         n_thresholds: int = 100,
-    ):
-        super().__init__(
-            name=name,
-            primary_metric=primary_metric,
-            direction=direction,
-            weight=weight,
-        )
+    ) -> None:
+        super().__init__(name=name)
 
         self.score_key = score_key
         self.target_key = target_key
@@ -68,7 +60,6 @@ class DCAEvaluator(CalibratedLogitsFallbackMixin, Evaluator):
         )
 
     def metrics(self, *, inputs: dict[str, Any]) -> dict[str, Any]:
-
         scores = self._resolve_score_tensor(inputs)
         targets = self.resolve(inputs, self.target_key).detach()
 
@@ -82,7 +73,9 @@ class DCAEvaluator(CalibratedLogitsFallbackMixin, Evaluator):
             probs = self._binary_positive_probability(scores)
 
         if probs.ndim != 1:
-            raise ValueError(f"Resolved positive-class probabilities must be shape (N,), got {tuple(probs.shape)}")
+            raise ValueError(
+                f"Resolved positive-class probabilities must be shape (N,), got {tuple(probs.shape)}"
+            )
 
         if probs.shape[0] != targets.shape[0]:
             raise ValueError(
@@ -90,24 +83,20 @@ class DCAEvaluator(CalibratedLogitsFallbackMixin, Evaluator):
             )
 
         targets = targets.float()
-
-        N = len(probs)
+        n = len(probs)
         thresholds = torch.linspace(0.01, 0.99, self.n_thresholds, device=probs.device)
 
         net_benefit = []
         treat_all = []
-
         prevalence = targets.mean()
 
         for t in thresholds:
             pred_pos = probs >= t
-
             tp = ((pred_pos) & (targets == 1)).sum().float()
             fp = ((pred_pos) & (targets == 0)).sum().float()
 
             weight = t / (1 - t)
-            nb = (tp / N) - (fp / N) * weight
-
+            nb = (tp / n) - (fp / n) * weight
             net_benefit.append(nb)
 
             nb_all = prevalence - (1 - prevalence) * weight
@@ -118,7 +107,6 @@ class DCAEvaluator(CalibratedLogitsFallbackMixin, Evaluator):
         treat_none = torch.zeros_like(net_benefit)
 
         best_idx = torch.argmax(net_benefit)
-
         best_threshold = thresholds[best_idx]
         best_nb = net_benefit[best_idx]
 

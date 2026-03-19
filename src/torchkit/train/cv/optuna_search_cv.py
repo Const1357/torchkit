@@ -200,6 +200,7 @@ class OptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
 
         selection_metric_name = self._selection_metric_name()
         selection_metric_direction = self._selection_metric_direction()
+        selection_metric_spec = self._selection_metric_spec()
 
         trial_results: list[OptunaTrialResult] = []
 
@@ -395,4 +396,5 @@ class OptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
             keep_final_model_state_dict_cpu=self.keep_final_model_state_dict_cpu,
             selection_metric_name=selection_metric_name,
             selection_metric_direction=selection_metric_direction,
+            selection_metric_spec=copy.deepcopy(selection_metric_spec),
         )

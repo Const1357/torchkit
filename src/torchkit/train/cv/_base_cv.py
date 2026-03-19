@@ -68,9 +68,6 @@ def _concat_tensor_dicts(dicts: list[dict[str, torch.Tensor]]) -> dict[str, torc
 
 
 def _resolve_original_indices_for_subset(subset: Subset) -> list[int]:
-    """
-    Resolve nested Subset indices back to original dataset coordinates.
-    """
     indices = list(subset.indices)
     base = subset.dataset
 
@@ -83,20 +80,6 @@ def _resolve_original_indices_for_subset(subset: Subset) -> list[int]:
 
 
 class BaseCV:
-    """
-    Base class for all CV runners.
-
-    Contains only generic CV infrastructure:
-    - splitter construction / dispatch
-    - dataloader construction
-    - selection metric helpers
-    - holdout evaluation
-    - calibrator fitting from OOF tensors
-
-    Search-specific logic belongs in BaseSearchCV.
-    Optuna-specific logic belongs in OptunaSearchMixin.
-    """
-
     def __init__(
         self,
         *,
@@ -173,18 +156,47 @@ class BaseCV:
         return splitter.split(dataset, y, groups)
 
     def _selection_metric_name(self) -> str:
-        dataset_evaluator = getattr(self.trainer_spec, "dataset_evaluator", None)
-        if dataset_evaluator is not None:
-            return str(dataset_evaluator.primary_metric)
+        selector_bundle = getattr(self.trainer_spec, "selector_evaluator", None)
+        if selector_bundle is not None:
+            parts: list[str] = []
+            batch_selector = getattr(selector_bundle, "batch_evaluator", None)
+            dataset_selector = getattr(selector_bundle, "dataset_evaluator", None)
+            if batch_selector is not None:
+                parts.append(f"batch:{batch_selector.name}")
+            if dataset_selector is not None:
+                parts.append(f"dataset:{dataset_selector.name}")
+            return " + ".join(parts) if parts else "selector_primary"
         return "val_loss"
+    
+    def _selection_metric_spec(self) -> dict[str, Any]:
+        selector_bundle = getattr(self.trainer_spec, "selector_evaluator", None)
+        if selector_bundle is not None:
+            batch_selector = getattr(selector_bundle, "batch_evaluator", None)
+            dataset_selector = getattr(selector_bundle, "dataset_evaluator", None)
+            return {
+                "type": "selector_bundle",
+                "direction": "maximize",
+                "batch_evaluator": None if batch_selector is None else batch_selector.selector_spec(),
+                "dataset_evaluator": None if dataset_selector is None else dataset_selector.selector_spec(),
+            }
+
+        return {
+            "type": "val_loss_fallback",
+            "name": "val_loss",
+            "direction": "minimize",
+        }
 
     def _selection_metric_direction(self) -> MetricDirection:
-        dataset_evaluator = getattr(self.trainer_spec, "dataset_evaluator", None)
-        if dataset_evaluator is not None:
-            return str(dataset_evaluator.direction)  # type: ignore[return-value]
+        selector_bundle = getattr(self.trainer_spec, "selector_evaluator", None)
+        if selector_bundle is not None:
+            return "maximize"
         return "minimize"
 
     def _to_selection_score(self, raw_metric: float) -> float:
+        selector_bundle = getattr(self.trainer_spec, "selector_evaluator", None)
+        if selector_bundle is not None:
+            return float(raw_metric)
+
         direction = self._selection_metric_direction()
         if direction == "maximize":
             return float(raw_metric)
@@ -212,12 +224,6 @@ class BaseCV:
         oof_logits: dict[str, torch.Tensor],
         oof_targets: dict[str, torch.Tensor],
     ) -> None:
-        """
-        Fit active calibrators from OOF tensors.
-
-        This method is intentionally generic and does not depend on any
-        concrete result dataclass.
-        """
         if not self.calibrate:
             return
 

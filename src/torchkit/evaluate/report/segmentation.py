@@ -4,19 +4,19 @@ from typing import Any, Optional, Tuple
 
 import torch
 
-from torchkit.evaluate._evaluator import Evaluator, MetricDirection
-from torchkit.evaluate._calibrated_logits_fallback_mixin import CalibratedLogitsFallbackMixin
+from torchkit.evaluate.report._report_evaluator import ReportEvaluator
+from torchkit.evaluate.mixins._calibrated_logits_fallback_mixin import CalibratedLogitsFallbackMixin
 
 
-class SegmentationEvaluator(CalibratedLogitsFallbackMixin, Evaluator):
+class SegmentationReportEvaluator(CalibratedLogitsFallbackMixin, ReportEvaluator):
     """
     Segmentation evaluation.
 
     Supports binary and multiclass segmentation.
 
     Expected inputs:
-        - score tensor:        (B,C,H,W) or (B,1,H,W)
-        - targets:             (B,H,W)
+        - score tensor:             (B,C,H,W) or (B,1,H,W)
+        - targets:                  (B,H,W)
         - optionally probabilities: (B,C,H,W) or (B,1,H,W)
         - optionally predictions:   (B,H,W)
     """
@@ -29,16 +29,8 @@ class SegmentationEvaluator(CalibratedLogitsFallbackMixin, Evaluator):
         probabilities_key: Optional[str] = None,
         predictions_key: Optional[str] = None,
         name: str = "segmentation",
-        primary_metric: str = "dice",
-        direction: MetricDirection = "maximize",
-        weight: float = 1.0,
-    ):
-        super().__init__(
-            name=name,
-            primary_metric=primary_metric,
-            direction=direction,
-            weight=weight,
-        )
+    ) -> None:
+        super().__init__(name=name)
 
         self.score_key = score_key
         self.target_key = target_key
@@ -59,34 +51,33 @@ class SegmentationEvaluator(CalibratedLogitsFallbackMixin, Evaluator):
         if scores.ndim != 4:
             raise ValueError(f"scores must be (B,C,H,W), got {tuple(scores.shape)}")
 
-        B, C, H, W = scores.shape
-        if C == 1:
+        _, c, _, _ = scores.shape
+        if c == 1:
             probs = torch.sigmoid(scores)
             preds = (probs > 0.5).long().squeeze(1)
-            report_C = 2
+            report_c = 2
         else:
             preds = torch.argmax(scores, dim=1)
-            report_C = C
+            report_c = c
 
-        return preds, report_C
+        return preds, report_c
 
     @staticmethod
     def _derive_predictions_from_probabilities(probs: torch.Tensor) -> tuple[torch.Tensor, int]:
         if probs.ndim != 4:
             raise ValueError(f"probabilities must be (B,C,H,W), got {tuple(probs.shape)}")
 
-        B, C, H, W = probs.shape
-        if C == 1:
+        _, c, _, _ = probs.shape
+        if c == 1:
             preds = (probs > 0.5).long().squeeze(1)
-            report_C = 2
+            report_c = 2
         else:
             preds = torch.argmax(probs, dim=1)
-            report_C = C
+            report_c = c
 
-        return preds, report_C
+        return preds, report_c
 
     def metrics(self, *, inputs: dict[str, Any]) -> dict[str, Any]:
-
         scores = self._resolve_score_tensor(inputs)
         targets = self.resolve(inputs, self.target_key).detach()
 
@@ -104,27 +95,22 @@ class SegmentationEvaluator(CalibratedLogitsFallbackMixin, Evaluator):
                 raise ValueError(
                     f"predictions shape {tuple(preds.shape)} does not match targets shape {tuple(targets.shape)}"
                 )
-
-            score_C = scores.shape[1]
-            report_C = 2 if score_C == 1 else score_C
-
+            score_c = scores.shape[1]
+            report_c = 2 if score_c == 1 else score_c
         elif self.probabilities_key is not None:
             probs = self.resolve(inputs, self.probabilities_key).detach()
-            preds, report_C = self._derive_predictions_from_probabilities(probs)
-
+            preds, report_c = self._derive_predictions_from_probabilities(probs)
         else:
-            preds, report_C = self._derive_predictions_from_scores(scores)
+            preds, report_c = self._derive_predictions_from_scores(scores)
 
         metrics: dict[str, Any] = {}
-
         dice_list = []
         iou_list = []
-
         eps = 1e-12
 
-        for c in range(report_C):
-            pred_c = preds == c
-            target_c = targets == c
+        for cls_idx in range(report_c):
+            pred_c = preds == cls_idx
+            target_c = targets == cls_idx
 
             tp = (pred_c & target_c).sum().float()
             fp = (pred_c & ~target_c).sum().float()
@@ -132,33 +118,32 @@ class SegmentationEvaluator(CalibratedLogitsFallbackMixin, Evaluator):
 
             dice = (2 * tp) / (2 * tp + fp + fn + eps)
             iou = tp / (tp + fp + fn + eps)
-
             precision = tp / (tp + fp + eps)
             recall = tp / (tp + fn + eps)
 
-            metrics[f"dice/class_{c}"] = float(dice)
-            metrics[f"iou/class_{c}"] = float(iou)
-            metrics[f"precision/class_{c}"] = float(precision)
-            metrics[f"recall/class_{c}"] = float(recall)
+            metrics[f"dice/class_{cls_idx}"] = float(dice)
+            metrics[f"iou/class_{cls_idx}"] = float(iou)
+            metrics[f"precision/class_{cls_idx}"] = float(precision)
+            metrics[f"recall/class_{cls_idx}"] = float(recall)
 
             dice_list.append(dice)
             iou_list.append(iou)
 
         dice_tensor = torch.stack(dice_list)
         iou_tensor = torch.stack(iou_list)
-
         pixel_accuracy = (preds == targets).float().mean()
 
-        metrics.update({
-            "dice": float(dice_tensor.mean()),
-            "iou": float(iou_tensor.mean()),
-            "pixel_accuracy": float(pixel_accuracy),
-        })
-
+        metrics.update(
+            {
+                "dice": float(dice_tensor.mean()),
+                "iou": float(iou_tensor.mean()),
+                "pixel_accuracy": float(pixel_accuracy),
+            }
+        )
         return metrics
 
 
-class Segmentation3DEvaluator(CalibratedLogitsFallbackMixin, Evaluator):
+class Segmentation3DReportEvaluator(CalibratedLogitsFallbackMixin, ReportEvaluator):
     """
     3D segmentation evaluator that handles optional masks.
 
@@ -177,16 +162,8 @@ class Segmentation3DEvaluator(CalibratedLogitsFallbackMixin, Evaluator):
         voxel_spacing: Tuple[float, float, float] = (1.0, 1.0, 1.0),
         include_background: bool = False,
         name: str = "segmentation3d",
-        primary_metric: str = "dice",
-        direction: MetricDirection = "maximize",
-        weight: float = 1.0,
-    ):
-        super().__init__(
-            name=name,
-            primary_metric=primary_metric,
-            direction=direction,
-            weight=weight,
-        )
+    ) -> None:
+        super().__init__(name=name)
 
         self.score_key = score_key
         self.target_key = target_key
@@ -213,31 +190,31 @@ class Segmentation3DEvaluator(CalibratedLogitsFallbackMixin, Evaluator):
         if scores.ndim != 5:
             raise ValueError(f"scores must be (B,C,D,H,W), got {tuple(scores.shape)}")
 
-        B, C, D, H, W = scores.shape
-        if C == 1:
+        _, c, _, _, _ = scores.shape
+        if c == 1:
             probs = torch.sigmoid(scores)
             preds = (probs > 0.5).long().squeeze(1)
-            report_C = 2
+            report_c = 2
         else:
             preds = torch.argmax(scores, dim=1)
-            report_C = C
+            report_c = c
 
-        return preds, report_C
+        return preds, report_c
 
     @staticmethod
     def _derive_predictions_from_probabilities(probs: torch.Tensor) -> tuple[torch.Tensor, int]:
         if probs.ndim != 5:
             raise ValueError(f"probabilities must be (B,C,D,H,W), got {tuple(probs.shape)}")
 
-        B, C, D, H, W = probs.shape
-        if C == 1:
+        _, c, _, _, _ = probs.shape
+        if c == 1:
             preds = (probs > 0.5).long().squeeze(1)
-            report_C = 2
+            report_c = 2
         else:
             preds = torch.argmax(probs, dim=1)
-            report_C = C
+            report_c = c
 
-        return preds, report_C
+        return preds, report_c
 
     def _surface_distances(self, pred, target):
         import numpy as np
@@ -280,23 +257,23 @@ class Segmentation3DEvaluator(CalibratedLogitsFallbackMixin, Evaluator):
         if scores_t.ndim != 5:
             raise ValueError("score tensor must be (B,C,D,H,W)")
 
-        score_C = scores_t.shape[1]
-        report_C = 2 if score_C == 1 else score_C
+        score_c = scores_t.shape[1]
+        report_c = 2 if score_c == 1 else score_c
 
-        classes = range(report_C)
+        classes = range(report_c)
         if not self.include_background:
-            classes = range(1, report_C)
+            classes = range(1, report_c)
 
         metrics: dict[str, Any] = {}
 
-        for c in classes:
-            metrics[f"dice/class_{c}"] = None
-            metrics[f"iou/class_{c}"] = None
-            metrics[f"precision/class_{c}"] = None
-            metrics[f"recall/class_{c}"] = None
-            metrics[f"volume_similarity/class_{c}"] = None
-            metrics[f"hd95/class_{c}"] = None
-            metrics[f"asd/class_{c}"] = None
+        for cls_idx in classes:
+            metrics[f"dice/class_{cls_idx}"] = None
+            metrics[f"iou/class_{cls_idx}"] = None
+            metrics[f"precision/class_{cls_idx}"] = None
+            metrics[f"recall/class_{cls_idx}"] = None
+            metrics[f"volume_similarity/class_{cls_idx}"] = None
+            metrics[f"hd95/class_{cls_idx}"] = None
+            metrics[f"asd/class_{cls_idx}"] = None
 
         metrics["dice"] = None
         metrics["iou"] = None
@@ -334,7 +311,6 @@ class Segmentation3DEvaluator(CalibratedLogitsFallbackMixin, Evaluator):
 
         preds_np = preds.numpy()
         targets_np = targets.numpy()
-
         eps = 1e-12
 
         dice_vals = {c: [] for c in classes}
@@ -345,23 +321,22 @@ class Segmentation3DEvaluator(CalibratedLogitsFallbackMixin, Evaluator):
         hd95_vals = {c: [] for c in classes}
         asd_vals = {c: [] for c in classes}
 
-        B = preds_np.shape[0]
+        bsz = preds_np.shape[0]
 
-        for b in range(B):
+        for b in range(bsz):
             pred_b = preds_np[b]
             tgt_b = targets_np[b]
 
-            for c in classes:
-                pred = (pred_b == c)
-                target = (tgt_b == c)
+            for cls_idx in classes:
+                pred = pred_b == cls_idx
+                target = tgt_b == cls_idx
 
-                tp = np.logical_and(pred, target).sum()
-                fp = np.logical_and(pred, np.logical_not(target)).sum()
-                fn = np.logical_and(np.logical_not(pred), target).sum()
+                tp = (pred & target).sum()
+                fp = (pred & ~target).sum()
+                fn = (~pred & target).sum()
 
                 dice = (2.0 * tp) / (2.0 * tp + fp + fn + eps)
                 iou = tp / (tp + fp + fn + eps)
-
                 precision = tp / (tp + fp + eps)
                 recall = tp / (tp + fn + eps)
 
@@ -369,16 +344,16 @@ class Segmentation3DEvaluator(CalibratedLogitsFallbackMixin, Evaluator):
                 target_vol = target.sum()
                 vs = 1.0 - (abs(pred_vol - target_vol) / (pred_vol + target_vol + eps))
 
-                dice_vals[c].append(dice)
-                iou_vals[c].append(iou)
-                prec_vals[c].append(precision)
-                rec_vals[c].append(recall)
-                vs_vals[c].append(vs)
+                dice_vals[cls_idx].append(dice)
+                iou_vals[cls_idx].append(iou)
+                prec_vals[cls_idx].append(precision)
+                rec_vals[cls_idx].append(recall)
+                vs_vals[cls_idx].append(vs)
 
                 dist = self._surface_distances(pred, target)
                 if dist is not None and dist.size > 0:
-                    hd95_vals[c].append(float(np.percentile(dist, 95)))
-                    asd_vals[c].append(float(dist.mean()))
+                    hd95_vals[cls_idx].append(float(np.percentile(dist, 95)))
+                    asd_vals[cls_idx].append(float(dist.mean()))
 
         perclass_dice = []
         perclass_iou = []
@@ -388,18 +363,18 @@ class Segmentation3DEvaluator(CalibratedLogitsFallbackMixin, Evaluator):
         perclass_hd95 = []
         perclass_asd = []
 
-        for c in classes:
-            d = float(np.mean(dice_vals[c])) if dice_vals[c] else None
-            j = float(np.mean(iou_vals[c])) if iou_vals[c] else None
-            p = float(np.mean(prec_vals[c])) if prec_vals[c] else None
-            r = float(np.mean(rec_vals[c])) if rec_vals[c] else None
-            v = float(np.mean(vs_vals[c])) if vs_vals[c] else None
+        for cls_idx in classes:
+            d = float(np.mean(dice_vals[cls_idx])) if dice_vals[cls_idx] else None
+            j = float(np.mean(iou_vals[cls_idx])) if iou_vals[cls_idx] else None
+            p = float(np.mean(prec_vals[cls_idx])) if prec_vals[cls_idx] else None
+            r = float(np.mean(rec_vals[cls_idx])) if rec_vals[cls_idx] else None
+            v = float(np.mean(vs_vals[cls_idx])) if vs_vals[cls_idx] else None
 
-            metrics[f"dice/class_{c}"] = d
-            metrics[f"iou/class_{c}"] = j
-            metrics[f"precision/class_{c}"] = p
-            metrics[f"recall/class_{c}"] = r
-            metrics[f"volume_similarity/class_{c}"] = v
+            metrics[f"dice/class_{cls_idx}"] = d
+            metrics[f"iou/class_{cls_idx}"] = j
+            metrics[f"precision/class_{cls_idx}"] = p
+            metrics[f"recall/class_{cls_idx}"] = r
+            metrics[f"volume_similarity/class_{cls_idx}"] = v
 
             if d is not None:
                 perclass_dice.append(d)
@@ -412,16 +387,16 @@ class Segmentation3DEvaluator(CalibratedLogitsFallbackMixin, Evaluator):
             if v is not None:
                 perclass_vs.append(v)
 
-            if hd95_vals[c]:
-                h = float(np.mean(hd95_vals[c]))
-                a = float(np.mean(asd_vals[c]))
-                metrics[f"hd95/class_{c}"] = h
-                metrics[f"asd/class_{c}"] = a
+            if hd95_vals[cls_idx]:
+                h = float(np.mean(hd95_vals[cls_idx]))
+                a = float(np.mean(asd_vals[cls_idx]))
+                metrics[f"hd95/class_{cls_idx}"] = h
+                metrics[f"asd/class_{cls_idx}"] = a
                 perclass_hd95.append(h)
                 perclass_asd.append(a)
             else:
-                metrics[f"hd95/class_{c}"] = None
-                metrics[f"asd/class_{c}"] = None
+                metrics[f"hd95/class_{cls_idx}"] = None
+                metrics[f"asd/class_{cls_idx}"] = None
 
         metrics["dice"] = float(np.mean(perclass_dice)) if perclass_dice else None
         metrics["iou"] = float(np.mean(perclass_iou)) if perclass_iou else None
@@ -430,7 +405,6 @@ class Segmentation3DEvaluator(CalibratedLogitsFallbackMixin, Evaluator):
         metrics["volume_similarity"] = float(np.mean(perclass_vs)) if perclass_vs else None
         metrics["hd95"] = float(np.mean(perclass_hd95)) if perclass_hd95 else None
         metrics["asd"] = float(np.mean(perclass_asd)) if perclass_asd else None
-
         metrics["voxel_accuracy"] = float((preds_np == targets_np).mean())
 
         return metrics

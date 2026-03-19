@@ -20,7 +20,8 @@ from torchkit.models.adapters.factory import FeatureAdapterSpec
 from torchkit.models.head_module.factory import HeadModuleSpec
 
 from torchkit.objectives.relational import CELoss
-from torchkit.evaluate._evaluator import Evaluator
+from torchkit.evaluate.select import SelectorEvaluator
+from torchkit.evaluate.select.bundle import BundleSelectorEvaluator
 
 
 # ============================================================
@@ -69,22 +70,17 @@ def make_model() -> TorchkitModel:
     return TorchkitModel(backbone=backbone, heads={"clf": head})
 
 
-class DummyEvaluator(Evaluator):
+class DummyEvaluator(SelectorEvaluator):
     def __init__(self):
-        super().__init__(
-            name="dummy_eval",
-            primary_metric="score",
-            direction="maximize",
-            weight=1.0,
-        )
+        super().__init__(name="dummy_eval", direction="maximize", weight=1.0)
 
     @property
     def required_keys(self) -> tuple[str, ...]:
         return ("clf/logits",)
 
-    def metrics(self, *, inputs: dict[str, object]) -> dict[str, object]:
+    def primary_metric(self, *, inputs: dict[str, object]) -> Tensor:
         logits = self.resolve(inputs, "clf/logits")
-        return {"score": float(logits.mean())}
+        return logits.mean()
 
 
 class CustomTrainer(Trainer):
@@ -107,8 +103,10 @@ def test_trainer_factory_build_sane():
     spec = TrainerSpec(
         cls=Trainer,
         objective=objective,
-        dataset_evaluator=evaluator,
-        batch_evaluator=evaluator,
+        selector_evaluator=BundleSelectorEvaluator(
+            dataset_evaluator=evaluator,
+            batch_evaluator=evaluator,
+        ),
         config=TrainerConfig(
             device="cpu",
             max_epochs=3,
@@ -122,8 +120,9 @@ def test_trainer_factory_build_sane():
     assert isinstance(trainer, Trainer)
     assert trainer.model is model
     assert trainer.objective is objective
-    assert trainer.dataset_evaluator is evaluator
-    assert trainer.batch_evaluator is evaluator
+    assert trainer.selector_evaluator is not None
+    assert trainer.selector_evaluator.dataset_evaluator is evaluator
+    assert trainer.selector_evaluator.batch_evaluator is evaluator
     assert trainer.config.max_epochs == 3
     assert trainer.config.optimizer_kwargs["lr"] == 0.1
 

@@ -4,10 +4,10 @@ from typing import Any
 
 import torch
 
-from torchkit.evaluate._evaluator import Evaluator, MetricDirection
+from torchkit.evaluate.report._report_evaluator import ReportEvaluator
 
 
-class RegressionEvaluator(Evaluator):
+class RegressionReportEvaluator(ReportEvaluator):
     """
     Regression evaluation.
 
@@ -24,16 +24,8 @@ class RegressionEvaluator(Evaluator):
         pred_key: str,
         target_key: str,
         name: str = "regression",
-        primary_metric: str = "rmse",
-        direction: MetricDirection = "minimize",
-        weight: float = 1.0,
-    ):
-        super().__init__(
-            name=name,
-            primary_metric=primary_metric,
-            direction=direction,
-            weight=weight,
-        )
+    ) -> None:
+        super().__init__(name=name)
 
         self.pred_key = pred_key
         self.target_key = target_key
@@ -43,12 +35,8 @@ class RegressionEvaluator(Evaluator):
         return (self.pred_key, self.target_key)
 
     def metrics(self, *, inputs: dict[str, Any]) -> dict[str, Any]:
-
-        preds = self.resolve(inputs, self.pred_key).detach()
-        targets = self.resolve(inputs, self.target_key).detach()
-
-        preds = preds.float()
-        targets = targets.float()
+        preds = self.resolve(inputs, self.pred_key).detach().float()
+        targets = self.resolve(inputs, self.target_key).detach().float()
 
         if preds.ndim == 1:
             preds = preds.unsqueeze(1)
@@ -59,7 +47,7 @@ class RegressionEvaluator(Evaluator):
         if preds.shape != targets.shape:
             raise ValueError("preds and targets must have identical shape")
 
-        N, T = preds.shape
+        _, t = preds.shape
 
         errors = preds - targets
         abs_errors = torch.abs(errors)
@@ -69,14 +57,11 @@ class RegressionEvaluator(Evaluator):
         rmse = torch.sqrt(mse)
         mae = abs_errors.mean(dim=0)
 
-        # R2
         target_mean = targets.mean(dim=0)
         ss_tot = ((targets - target_mean) ** 2).sum(dim=0)
         ss_res = sq_errors.sum(dim=0)
-
         r2 = 1 - (ss_res / (ss_tot + 1e-12))
 
-        # Pearson correlation
         pred_centered = preds - preds.mean(dim=0)
         target_centered = targets - targets.mean(dim=0)
 
@@ -87,7 +72,6 @@ class RegressionEvaluator(Evaluator):
         )
 
         metrics: dict[str, Any] = {
-
             "mse": float(mse.mean()),
             "rmse": float(rmse.mean()),
             "mae": float(mae.mean()),
@@ -95,14 +79,11 @@ class RegressionEvaluator(Evaluator):
             "pearson": float(corr.mean()),
         }
 
-        # per target metrics
-
-        for t in range(T):
-
-            metrics[f"mse/target_{t}"] = float(mse[t])
-            metrics[f"rmse/target_{t}"] = float(rmse[t])
-            metrics[f"mae/target_{t}"] = float(mae[t])
-            metrics[f"r2/target_{t}"] = float(r2[t])
-            metrics[f"pearson/target_{t}"] = float(corr[t])
+        for target_idx in range(t):
+            metrics[f"mse/target_{target_idx}"] = float(mse[target_idx])
+            metrics[f"rmse/target_{target_idx}"] = float(rmse[target_idx])
+            metrics[f"mae/target_{target_idx}"] = float(mae[target_idx])
+            metrics[f"r2/target_{target_idx}"] = float(r2[target_idx])
+            metrics[f"pearson/target_{target_idx}"] = float(corr[target_idx])
 
         return metrics

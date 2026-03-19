@@ -254,6 +254,7 @@ class OptunaSearchCVResult:
 
     selection_metric_name: str = ""
     selection_metric_direction: MetricDirection = "maximize"
+    selection_metric_spec: dict[str, Any] = field(default_factory=dict)
 
     def rebuild_final_model(
         self,
@@ -363,6 +364,7 @@ class OptunaSearchCVResult:
             "keep_final_model_state_dict_cpu": self.keep_final_model_state_dict_cpu,
             "selection_metric_name": self.selection_metric_name,
             "selection_metric_direction": self.selection_metric_direction,
+            "selection_metric_spec": copy.deepcopy(self.selection_metric_spec),
         }
 
         if include_specs_repr:
@@ -547,6 +549,7 @@ class NestedOptunaSearchCVResult:
 
     selection_metric_name: str = ""
     selection_metric_direction: MetricDirection = "maximize"
+    selection_metric_spec: dict[str, Any] = field(default_factory=dict)
 
     def rebuild_final_model(
         self,
@@ -596,6 +599,7 @@ class NestedOptunaSearchCVResult:
             "keep_final_model_state_dict_cpu": self.keep_final_model_state_dict_cpu,
             "selection_metric_name": self.selection_metric_name,
             "selection_metric_direction": self.selection_metric_direction,
+            "selection_metric_spec": copy.deepcopy(self.selection_metric_spec),
         }
 
         if include_specs_repr:

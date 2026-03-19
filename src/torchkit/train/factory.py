@@ -7,7 +7,7 @@ import copy
 from torchkit.models.Model._model import TorchkitModel
 from torchkit.models.Model.factory import TorchkitModelFactory, TorchkitModelSpec
 from torchkit.objectives import Objective
-from torchkit.evaluate import Evaluator
+from torchkit.evaluate.select.bundle import BundleSelectorEvaluator
 from torchkit.train.trainer import Trainer, TrainerConfig
 
 
@@ -15,8 +15,7 @@ from torchkit.train.trainer import Trainer, TrainerConfig
 class TrainerSpec:
     cls: type[Trainer] | None = Trainer
     objective: Optional[Objective] = None
-    dataset_evaluator: Optional[Evaluator] = None
-    batch_evaluator: Optional[Evaluator] = None
+    selector_evaluator: Optional[BundleSelectorEvaluator] = None
     config: TrainerConfig = field(default_factory=TrainerConfig)
 
 
@@ -42,8 +41,7 @@ class TrainerFactory:
         trainer = spec.cls(
             model=model,
             objective=spec.objective,
-            dataset_evaluator=spec.dataset_evaluator,
-            batch_evaluator=spec.batch_evaluator,
+            selector_evaluator=spec.selector_evaluator,
             config=copy.deepcopy(spec.config),
         )
 

@@ -83,6 +83,7 @@ class NestedOptunaSearchCV(BaseSearchCV):
 
         selection_metric_name = self._selection_metric_name()
         selection_metric_direction = self._selection_metric_direction()
+        selection_metric_spec = self._selection_metric_spec()
 
         for outer_fold, (outer_train_subset, outer_test_subset) in enumerate(
             self._split(self.outer_splitter, dataset, index, groups)
@@ -148,4 +149,5 @@ class NestedOptunaSearchCV(BaseSearchCV):
             keep_final_model_state_dict_cpu=self.keep_final_model_state_dict_cpu,
             selection_metric_name=selection_metric_name,
             selection_metric_direction=selection_metric_direction,
+            selection_metric_spec=copy.deepcopy(selection_metric_spec),
         )

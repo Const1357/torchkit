@@ -24,8 +24,8 @@ from torchkit.train.factory import TrainerSpec
 from torchkit.train.trainer import Trainer, TrainerConfig
 
 from torchkit.objectives.relational import CELoss
-from torchkit.evaluate._evaluator import Evaluator
-from torchkit.evaluate.classification_evaluator import ClassificationEvaluator
+from torchkit.evaluate.select import AccuracySelectorEvaluator, SelectorEvaluator
+from torchkit.evaluate.select.bundle import BundleSelectorEvaluator
 
 from torchkit.train.cv.optuna_search_cv import OptunaSearchCV
 from torchkit.train.cv.nested_optuna_search_cv import NestedOptunaSearchCV
@@ -119,7 +119,7 @@ class TinyClassificationDataset(TorchkitDataset):
         }
 
 
-class ErrorRateEvaluator(Evaluator):
+class ErrorRateEvaluator(SelectorEvaluator):
     """
     Same prediction surface as ClassificationEvaluator, but primary metric is minimized.
     """
@@ -130,12 +130,7 @@ class ErrorRateEvaluator(Evaluator):
         target_key: str,
         name: str = "error_rate",
     ):
-        super().__init__(
-            name=name,
-            primary_metric="error_rate",
-            direction="minimize",
-            weight=1.0,
-        )
+        super().__init__(name=name, direction="minimize", weight=1.0)
         self.score_key = score_key
         self.target_key = target_key
 
@@ -143,7 +138,7 @@ class ErrorRateEvaluator(Evaluator):
     def required_keys(self) -> tuple[str, ...]:
         return (self.score_key, self.target_key)
 
-    def metrics(self, *, inputs: dict[str, Any]) -> dict[str, Any]:
+    def primary_metric(self, *, inputs: dict[str, Any]) -> Tensor:
         logits = self.resolve(inputs, self.score_key).detach()
         targets = self.resolve(inputs, self.target_key).detach()
 
@@ -153,8 +148,7 @@ class ErrorRateEvaluator(Evaluator):
             raise ValueError(f"Expected targets of shape (N,), got {tuple(targets.shape)}.")
 
         preds = torch.argmax(logits, dim=1)
-        error_rate = float((preds != targets).float().mean())
-        return {"error_rate": error_rate}
+        return (preds != targets).float().mean()
 
 
 def make_labels_and_groups() -> tuple[list[int], list[int]]:
@@ -197,7 +191,7 @@ def make_model_spec(*, scale_factor: float = 1.0) -> TorchkitModelSpec:
     )
 
 
-def make_trainer_spec(*, evaluator: Evaluator, max_epochs: int = 2) -> TrainerSpec:
+def make_trainer_spec(*, evaluator: SelectorEvaluator, max_epochs: int = 2) -> TrainerSpec:
     return TrainerSpec(
         cls=Trainer,
         objective=CELoss(
@@ -205,8 +199,7 @@ def make_trainer_spec(*, evaluator: Evaluator, max_epochs: int = 2) -> TrainerSp
             target_path="batch/y",
             reduction="mean",
         ),
-        dataset_evaluator=evaluator,
-        batch_evaluator=None,
+        selector_evaluator=BundleSelectorEvaluator(dataset_evaluator=evaluator),
         config=TrainerConfig(
             device="cpu",
             random_seed=0,

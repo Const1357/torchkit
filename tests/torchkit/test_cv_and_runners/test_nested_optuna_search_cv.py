@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from torchkit.data.split import StratifiedKFold, GroupKFold, StratifiedGroupKFold
-from torchkit.evaluate.classification_evaluator import ClassificationEvaluator
+from torchkit.evaluate.select import AccuracySelectorEvaluator
 
 from torchkit.train.cv._optuna_results import (
     NestedOptunaSearchCVResult,
@@ -28,11 +28,10 @@ def test_nested_cv_rejects_unrebuildable_final_model_configuration():
 
     model_spec = make_model_spec()
     trainer_spec = make_trainer_spec(
-        evaluator=ClassificationEvaluator(
+        evaluator=AccuracySelectorEvaluator(
             score_key="clf/logits",
             target_key="batch/y",
             name="classification",
-            primary_metric="accuracy",
         )
     )
 
@@ -60,11 +59,10 @@ def test_nested_cv_logs_everything_needed_for_reporting_stratified(
 
     model_spec = make_model_spec(scale_factor=1.0)
     trainer_spec = make_trainer_spec(
-        evaluator=ClassificationEvaluator(
+        evaluator=AccuracySelectorEvaluator(
             score_key="clf/logits",
             target_key="batch/y",
             name="classification",
-            primary_metric="accuracy",
         ),
         max_epochs=2,
     )
@@ -95,7 +93,7 @@ def test_nested_cv_logs_everything_needed_for_reporting_stratified(
     assert result.k_inner == 2
     assert result.n_trials == 1
     assert result.max_trial_attempts == 3
-    assert result.selection_metric_name == "accuracy"
+    assert result.selection_metric_name == "dataset:classification"
     assert result.selection_metric_direction == "maximize"
     assert result.final_model_dir == str(tmp_path)
 
@@ -135,8 +133,8 @@ def test_nested_cv_logs_everything_needed_for_reporting_stratified(
         assert outer.outer_test_metrics is not None
         assert inner.holdout_metrics is not None
         assert outer.outer_test_metrics == inner.holdout_metrics
-        assert "val/accuracy" in outer.outer_test_metrics
-        assert outer.outer_test_metrics["val/accuracy"] == pytest.approx(1.0)
+        assert "val/classification" in outer.outer_test_metrics
+        assert outer.outer_test_metrics["val/classification"] == pytest.approx(1.0)
 
         # Final saved model should exist inside outer-fold subdir
         assert inner.final_model_state_dict_path is not None
@@ -161,11 +159,10 @@ def test_nested_cv_group_splitters_have_no_group_leakage(
 
     model_spec = make_model_spec(scale_factor=1.0)
     trainer_spec = make_trainer_spec(
-        evaluator=ClassificationEvaluator(
+        evaluator=AccuracySelectorEvaluator(
             score_key="clf/logits",
             target_key="batch/y",
             name="classification",
-            primary_metric="accuracy",
         ),
         max_epochs=2,
     )
@@ -230,8 +227,8 @@ def test_nested_cv_handles_minimize_selection_metric_correctly(
 
     result = cv.run(tiny_dataset, index=y, groups=None)
 
-    assert result.selection_metric_name == "error_rate"
-    assert result.selection_metric_direction == "minimize"
+    assert result.selection_metric_name == "dataset:error_rate"
+    assert result.selection_metric_direction == "maximize"
 
     for outer in result.outer_results:
         assert outer.best_metric == pytest.approx(0.0)
@@ -250,11 +247,10 @@ def test_nested_cv_rebuilds_final_model_and_trainer_and_preserves_calibrator_fit
 
     model_spec = make_model_spec(scale_factor=1.0)
     trainer_spec = make_trainer_spec(
-        evaluator=ClassificationEvaluator(
+        evaluator=AccuracySelectorEvaluator(
             score_key="clf/logits",
             target_key="batch/y",
             name="classification",
-            primary_metric="accuracy",
         ),
         max_epochs=2,
     )
@@ -313,11 +309,10 @@ def test_nested_cv_result_is_pickleable_and_reconstruction_survives_roundtrip(
 
     model_spec = make_model_spec(scale_factor=1.0)
     trainer_spec = make_trainer_spec(
-        evaluator=ClassificationEvaluator(
+        evaluator=AccuracySelectorEvaluator(
             score_key="clf/logits",
             target_key="batch/y",
             name="classification",
-            primary_metric="accuracy",
         ),
         max_epochs=2,
     )
@@ -370,22 +365,20 @@ def test_nested_cv_is_deterministic_for_same_seed(
 
     model_spec_1 = make_model_spec(scale_factor=1.0)
     trainer_spec_1 = make_trainer_spec(
-        evaluator=ClassificationEvaluator(
+        evaluator=AccuracySelectorEvaluator(
             score_key="clf/logits",
             target_key="batch/y",
             name="classification",
-            primary_metric="accuracy",
         ),
         max_epochs=2,
     )
 
     model_spec_2 = make_model_spec(scale_factor=1.0)
     trainer_spec_2 = make_trainer_spec(
-        evaluator=ClassificationEvaluator(
+        evaluator=AccuracySelectorEvaluator(
             score_key="clf/logits",
             target_key="batch/y",
             name="classification",
-            primary_metric="accuracy",
         ),
         max_epochs=2,
     )

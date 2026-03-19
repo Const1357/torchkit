@@ -21,7 +21,8 @@ from torchkit.models.decision._decision_module import DecisionModule
 
 from torchkit.objectives.relational import CELoss
 from torchkit.objectives.Multitask import MultitaskObjective
-from torchkit.evaluate._evaluator import Evaluator
+from torchkit.evaluate.select import SelectorEvaluator
+from torchkit.evaluate.select.bundle import BundleSelectorEvaluator
 
 
 # ============================================================
@@ -166,79 +167,57 @@ class EmptyDataset(Dataset):
 # Evaluators for trainer tests
 # ============================================================
 
-class DatasetAccuracyEvaluator(Evaluator):
+class DatasetAccuracyEvaluator(SelectorEvaluator):
     def __init__(self):
-        super().__init__(
-            name="dataset_accuracy",
-            primary_metric="accuracy",
-            direction="maximize",
-            weight=1.0,
-        )
+        super().__init__(name="dataset_accuracy", direction="maximize", weight=1.0)
 
     @property
     def required_keys(self) -> tuple[str, ...]:
         return ("clf/logits", "batch/y")
 
-    def metrics(self, *, inputs: dict[str, object]) -> dict[str, object]:
+    def primary_metric(self, *, inputs: dict[str, object]) -> Tensor:
         logits = self.resolve(inputs, "clf/logits")
         targets = self.resolve(inputs, "batch/y")
         preds = torch.argmax(logits, dim=1)
-        acc = float((preds == targets).float().mean())
-        return {"accuracy": acc}
+        return (preds == targets).float().mean()
 
 
-class BatchAccuracyEvaluator(Evaluator):
+class BatchAccuracyEvaluator(SelectorEvaluator):
     def __init__(self):
-        super().__init__(
-            name="batch_accuracy",
-            primary_metric="accuracy",
-            direction="maximize",
-            weight=1.0,
-        )
+        super().__init__(name="batch_accuracy", direction="maximize", weight=1.0)
 
     @property
     def required_keys(self) -> tuple[str, ...]:
         return ("clf/logits", "batch/y")
 
-    def metrics(self, *, inputs: dict[str, object]) -> dict[str, object]:
+    def primary_metric(self, *, inputs: dict[str, object]) -> Tensor:
         logits = self.resolve(inputs, "clf/logits")
         targets = self.resolve(inputs, "batch/y")
         preds = torch.argmax(logits, dim=1)
-        acc = float((preds == targets).float().mean())
-        return {"accuracy": acc}
+        return (preds == targets).float().mean()
 
 
-class BadBatchEvaluator(Evaluator):
+class BadBatchEvaluator(SelectorEvaluator):
     def __init__(self):
-        super().__init__(
-            name="bad_batch",
-            primary_metric="score",
-            direction="maximize",
-            weight=1.0,
-        )
+        super().__init__(name="bad_batch", direction="maximize", weight=1.0)
 
     @property
     def required_keys(self) -> tuple[str, ...]:
         return ("clf/logits",)
 
-    def metrics(self, *, inputs: dict[str, object]):
+    def primary_metric(self, *, inputs: dict[str, object]):
         return "not a dict"
 
 
-class BadDatasetEvaluator(Evaluator):
+class BadDatasetEvaluator(SelectorEvaluator):
     def __init__(self):
-        super().__init__(
-            name="bad_dataset",
-            primary_metric="score",
-            direction="maximize",
-            weight=1.0,
-        )
+        super().__init__(name="bad_dataset", direction="maximize", weight=1.0)
 
     @property
     def required_keys(self) -> tuple[str, ...]:
         return ("clf/logits",)
 
-    def metrics(self, *, inputs: dict[str, object]):
+    def primary_metric(self, *, inputs: dict[str, object]):
         return "not a dict"
 
 
@@ -289,8 +268,10 @@ def trainer() -> Trainer:
     return Trainer(
         model=model,
         objective=objective,
-        dataset_evaluator=DatasetAccuracyEvaluator(),
-        batch_evaluator=BatchAccuracyEvaluator(),
+        selector_evaluator=BundleSelectorEvaluator(
+            dataset_evaluator=DatasetAccuracyEvaluator(),
+            batch_evaluator=BatchAccuracyEvaluator(),
+        ),
         config=config,
     )
 
@@ -467,8 +448,8 @@ def test_validate_one_epoch_logs_dataset_and_batch_metrics(
     log = trainer._validate_one_epoch(val_loader, epoch=1)
 
     assert "val_loss" in log
-    assert "val/accuracy" in log
-    assert "val_batch/accuracy" in log
+    assert "val/dataset_accuracy" in log
+    assert "val_batch/batch_accuracy" in log
     assert "__selection_score__" in log
 
 
@@ -534,11 +515,11 @@ def test_bad_batch_evaluator_raises_in_validation(
     trainer = Trainer(
         model=model,
         objective=objective,
-        batch_evaluator=BadBatchEvaluator(),
+        selector_evaluator=BundleSelectorEvaluator(batch_evaluator=BadBatchEvaluator()),
         config=TrainerConfig(device="cpu", max_epochs=1),
     )
 
-    with pytest.raises(TypeError, match="dict"):
+    with pytest.raises(TypeError, match="Tensor"):
         trainer.fit(train_loader, val_loader)
 
 
@@ -555,11 +536,11 @@ def test_bad_dataset_evaluator_raises_in_validation(
     trainer = Trainer(
         model=model,
         objective=objective,
-        dataset_evaluator=BadDatasetEvaluator(),
+        selector_evaluator=BundleSelectorEvaluator(dataset_evaluator=BadDatasetEvaluator()),
         config=TrainerConfig(device="cpu", max_epochs=1),
     )
 
-    with pytest.raises(TypeError, match="dict"):
+    with pytest.raises(TypeError, match="Tensor"):
         trainer.fit(train_loader, val_loader)
 
 
@@ -580,7 +561,7 @@ def test_trainer_early_stopping_stops_before_max_epochs(
     trainer = Trainer(
         model=model,
         objective=objective,
-        dataset_evaluator=DatasetAccuracyEvaluator(),
+        selector_evaluator=BundleSelectorEvaluator(dataset_evaluator=DatasetAccuracyEvaluator()),
         config=TrainerConfig(
             device="cpu",
             max_epochs=10,

@@ -10,7 +10,7 @@ import torch
 from torch.utils.data import Subset
 
 from torchkit.data.split import StratifiedKFold
-from torchkit.evaluate.classification_evaluator import ClassificationEvaluator
+from torchkit.evaluate.select import AccuracySelectorEvaluator
 from torchkit.train.cv._base_cv import (
     BaseCV,
     _safe_take,
@@ -99,11 +99,10 @@ def test_resolve_original_indices_for_nested_subset(tiny_dataset):
 def test_base_cv_selection_metric_helpers_maximize_and_minimize(tmp_path):
     model_spec = make_model_spec()
     max_trainer_spec = make_trainer_spec(
-        evaluator=ClassificationEvaluator(
+        evaluator=AccuracySelectorEvaluator(
             score_key="clf/logits",
             target_key="batch/y",
             name="classification",
-            primary_metric="accuracy",
         )
     )
     min_trainer_spec = make_trainer_spec(
@@ -128,23 +127,22 @@ def test_base_cv_selection_metric_helpers_maximize_and_minimize(tmp_path):
         final_model_dir=str(tmp_path / "min"),
     )
 
-    assert max_cv._selection_metric_name() == "accuracy"
+    assert max_cv._selection_metric_name() == "dataset:classification"
     assert max_cv._selection_metric_direction() == "maximize"
     assert max_cv._to_selection_score(0.8) == pytest.approx(0.8)
 
-    assert min_cv._selection_metric_name() == "error_rate"
-    assert min_cv._selection_metric_direction() == "minimize"
-    assert min_cv._to_selection_score(0.2) == pytest.approx(-0.2)
+    assert min_cv._selection_metric_name() == "dataset:error_rate"
+    assert min_cv._selection_metric_direction() == "maximize"
+    assert min_cv._to_selection_score(0.2) == pytest.approx(0.2)
 
 
 def test_base_cv_rejects_unrebuildable_configuration():
     model_spec = make_model_spec()
     trainer_spec = make_trainer_spec(
-        evaluator=ClassificationEvaluator(
+        evaluator=AccuracySelectorEvaluator(
             score_key="clf/logits",
             target_key="batch/y",
             name="classification",
-            primary_metric="accuracy",
         )
     )
 
@@ -162,11 +160,10 @@ def test_base_cv_rejects_unrebuildable_configuration():
 def test_base_search_cv_routes_parameters_into_real_specs(tmp_path):
     model_spec = make_model_spec()
     trainer_spec = make_trainer_spec(
-        evaluator=ClassificationEvaluator(
+        evaluator=AccuracySelectorEvaluator(
             score_key="clf/logits",
             target_key="batch/y",
             name="classification",
-            primary_metric="accuracy",
         ),
         max_epochs=2,
     )
@@ -228,11 +225,10 @@ def test_results_containers_support_offline_processing_and_reconstruction(
 
     model_spec = make_model_spec(scale_factor=1.0)
     trainer_spec = make_trainer_spec(
-        evaluator=ClassificationEvaluator(
+        evaluator=AccuracySelectorEvaluator(
             score_key="clf/logits",
             target_key="batch/y",
             name="classification",
-            primary_metric="accuracy",
         ),
         max_epochs=2,
     )
@@ -307,11 +303,10 @@ def test_nested_results_support_offline_processing_and_reconstruction(
 
     model_spec = make_model_spec(scale_factor=1.0)
     trainer_spec = make_trainer_spec(
-        evaluator=ClassificationEvaluator(
+        evaluator=AccuracySelectorEvaluator(
             score_key="clf/logits",
             target_key="batch/y",
             name="classification",
-            primary_metric="accuracy",
         ),
         max_epochs=2,
     )

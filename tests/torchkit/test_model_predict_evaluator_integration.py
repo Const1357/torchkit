@@ -15,12 +15,14 @@ from torchkit.models.calibration._calibrator import Calibrator
 from torchkit.models.probability_mapping._probability_mapper import ProbabilityMapper
 from torchkit.models.decision._decision_module import DecisionModule
 
-from torchkit.evaluate.classification_evaluator import ClassificationEvaluator
-from torchkit.evaluate.regression_evaluator import RegressionEvaluator
-from torchkit.evaluate.calibration_evaluator import CalibrationEvaluator
-from torchkit.evaluate.roc_evaluator import ROCBinaryEvaluator
-from torchkit.evaluate.dca_evaluator import DCAEvaluator
-from torchkit.evaluate._evaluator import CompositeEvaluator
+from torchkit.evaluate.report import (
+    CalibrationReportEvaluator,
+    ClassificationReportEvaluator,
+    CompositeReportEvaluator,
+    DCAReportEvaluator,
+    ROCBinaryReportEvaluator,
+    RegressionReportEvaluator,
+)
 
 
 # ============================================================
@@ -212,7 +214,7 @@ def test_model_predict_outputs_work_with_classification_evaluator(
         "batch": {"y": batch_payload["y_clf"]},
     }
 
-    evaluator = ClassificationEvaluator(
+    evaluator = ClassificationReportEvaluator(
         score_key="clf/logits",
         target_key="batch/y",
         probabilities_key="clf/probabilities",
@@ -241,7 +243,7 @@ def test_model_predict_outputs_work_with_calibration_evaluator(
         "batch": {"y": batch_payload["y_clf"]},
     }
 
-    evaluator = CalibrationEvaluator(
+    evaluator = CalibrationReportEvaluator(
         score_key="clf/logits",
         target_key="batch/y",
         probabilities_key="clf/probabilities",
@@ -269,7 +271,7 @@ def test_model_predict_outputs_work_with_roc_evaluator(
         "batch": {"y": batch_payload["y_clf"]},
     }
 
-    evaluator = ROCBinaryEvaluator(
+    evaluator = ROCBinaryReportEvaluator(
         score_key="clf/logits",
         target_key="batch/y",
         probabilities_key="clf/probabilities",
@@ -297,7 +299,7 @@ def test_model_predict_outputs_work_with_dca_evaluator(
         "batch": {"y": batch_payload["y_clf"]},
     }
 
-    evaluator = DCAEvaluator(
+    evaluator = DCAReportEvaluator(
         score_key="clf/logits",
         target_key="batch/y",
         probabilities_key="clf/probabilities",
@@ -326,7 +328,7 @@ def test_model_predict_outputs_work_with_regression_evaluator(
         "batch": {"target": batch_payload["y_reg"]},
     }
 
-    evaluator = RegressionEvaluator(
+    evaluator = RegressionReportEvaluator(
         pred_key="reg/predictions",
         target_key="batch/target",
     )
@@ -353,7 +355,7 @@ def test_model_predict_outputs_work_with_composite_evaluator(
         "batch": {"y": batch_payload["y_clf"]},
     }
 
-    clf_eval = ClassificationEvaluator(
+    clf_eval = ClassificationReportEvaluator(
         score_key="clf/logits",
         target_key="batch/y",
         probabilities_key="clf/probabilities",
@@ -361,25 +363,21 @@ def test_model_predict_outputs_work_with_composite_evaluator(
         name="classification",
     )
 
-    cal_eval = CalibrationEvaluator(
+    cal_eval = CalibrationReportEvaluator(
         score_key="clf/logits",
         target_key="batch/y",
         probabilities_key="clf/probabilities",
         name="calibration",
     )
 
-    composite = CompositeEvaluator(
-        [clf_eval, cal_eval],
-        name="composite",
-        primary_metric="__primary__",
-    )
+    composite = CompositeReportEvaluator([clf_eval, cal_eval], name="composite")
 
     metrics = composite(inputs=eval_inputs)
 
     assert "classification/accuracy" in metrics
     assert "classification/macro_f1" in metrics
     assert "calibration/brier" in metrics
-    assert "__primary__" in metrics
+    assert "classification/accuracy" in metrics
 
 
 def test_calibrated_logits_appear_only_when_calibrator_enabled(
@@ -405,7 +403,7 @@ def test_calibrated_logits_appear_only_when_calibrator_enabled(
     )
     assert "calibrated_logits" in pred_enabled["clf"]
 
-    evaluator = ClassificationEvaluator(
+    evaluator = ClassificationReportEvaluator(
         score_key="clf/calibrated_logits",
         target_key="batch/y",
         probabilities_key="clf/probabilities",
@@ -433,7 +431,7 @@ def test_classification_evaluator_can_fallback_from_calibrated_logits_when_disab
     )
     assert "calibrated_logits" not in pred_out["clf"]
 
-    evaluator = ClassificationEvaluator(
+    evaluator = ClassificationReportEvaluator(
         score_key="clf/calibrated_logits",
         target_key="batch/y",
         probabilities_key="clf/probabilities",
@@ -460,7 +458,7 @@ def test_multitask_predict_mixed_prediction_heads_can_be_evaluated_independently
         return_raw_head_outputs=True,
     )
 
-    clf_metrics = ClassificationEvaluator(
+    clf_metrics = ClassificationReportEvaluator(
         score_key="clf/logits",
         target_key="batch/y",
         probabilities_key="clf/probabilities",
@@ -472,7 +470,7 @@ def test_multitask_predict_mixed_prediction_heads_can_be_evaluated_independently
         }
     )
 
-    reg_metrics = RegressionEvaluator(
+    reg_metrics = RegressionReportEvaluator(
         pred_key="reg/predictions",
         target_key="batch/target",
     )(

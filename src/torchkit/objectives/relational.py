@@ -44,9 +44,9 @@ class BCELoss(Objective):
         input_tensor = self.resolve(inputs, self._input_path)
         target_tensor = self.resolve(inputs, self._target_path)
 
-        from torch.nn.functional import binary_cross_entropy
+        from torch.nn.functional import binary_cross_entropy_with_logits
 
-        return binary_cross_entropy(
+        return binary_cross_entropy_with_logits(
             input=input_tensor,
             target=target_tensor,
             weight=self._class_weight,

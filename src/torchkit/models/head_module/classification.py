@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Optional
 
 from torch import nn, Tensor
 
@@ -16,13 +17,18 @@ class ClassifierHeadLinear(nn.Module):
 
 
 class ClassifierHeadMLP(nn.Module):
+    """Lazy MLP head for classification tasks.
+    
+    ### *Important*
+    If you use a it as a lazy module, you must ensure that
+    the lazy layer is initialized before instantiating a `Trainer` by passing a dummy input."""
 
     def __init__(
         self,
-        input_dim: int,
         hidden_dims: list[int],
         num_classes: int,
         *,
+        input_dim: Optional[int],
         activation: nn.Module = nn.ReLU,
         norm: nn.Module | None = None,  # eg. nn.BatchNorm1d, InstanceNorm1d, LayerNorm, etc. Applied after linear and before activation.
         dropout: float = 0.0,
@@ -38,8 +44,14 @@ class ClassifierHeadMLP(nn.Module):
         layers: list[nn.Module] = []
         prev_dim = input_dim
 
-        for hidden_dim in hidden_dims:
-            layers.append(nn.Linear(prev_dim, hidden_dim))
+        for i, hidden_dim in enumerate(hidden_dims):
+
+            if i == 0 and prev_dim is None:
+                layers.append(nn.LazyLinear(hidden_dim))
+            else:
+                if prev_dim is None:
+                    raise ValueError("prev_dim should have been inferred after the first lazy layer.")
+                layers.append(nn.Linear(prev_dim, hidden_dim))
 
             if norm is not None:
                 layers.append(norm(hidden_dim))

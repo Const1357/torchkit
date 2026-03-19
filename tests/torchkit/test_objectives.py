@@ -356,8 +356,8 @@ def test_bce_loss_matches_pytorch(bce_inputs: dict[str, object]):
     )
 
     loss = obj(inputs=bce_inputs)
-    expected = torch.nn.functional.binary_cross_entropy(
-        ce_inputs := bce_inputs["clf"]["probabilities"],
+    expected = torch.nn.functional.binary_cross_entropy_with_logits(
+        bce_inputs["clf"]["probabilities"],
         bce_inputs["batch"]["target"],
         reduction="mean",
     )
