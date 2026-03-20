@@ -8,6 +8,7 @@ import os
 from torch.utils.data import Subset
 
 from torchkit.data._dataset import TorchkitDataset
+from torchkit.data.split import KFoldSplitter
 from torchkit.train.cv._base_cv import _resolve_original_indices_for_subset
 from torchkit.train.cv._base_search_cv import BaseSearchCV
 from torchkit.train.cv._optuna_results import (
@@ -51,19 +52,28 @@ class NestedOptunaSearchCV(BaseSearchCV):
             model_spec=model_spec,
             trainer_spec=trainer_spec,
             parameter_grid=parameter_grid,
-            outer_splitter_cls=outer_splitter_cls,
-            inner_splitter_cls=inner_splitter_cls,
+            splitter_cls=outer_splitter_cls,
             dataloader_factory=dataloader_factory,
             n_trials=n_trials,
             max_trial_attempts=max_trial_attempts,
-            k_outer=k_outer,
-            k_inner=k_inner,
-            shuffle_outer=shuffle_outer,
-            shuffle_inner=shuffle_inner,
+            n_splits=k_outer,
+            shuffle=shuffle_outer,
             random_state=random_state,
             calibrate=calibrate,
             final_model_dir=final_model_dir,
             keep_final_model_state_dict_cpu=keep_final_model_state_dict_cpu,
+        )
+        self.outer_splitter_cls: type[KFoldSplitter] = outer_splitter_cls
+        self.inner_splitter_cls: type[KFoldSplitter] = inner_splitter_cls
+        self.k_outer = int(k_outer)
+        self.k_inner = int(k_inner)
+        self.shuffle_outer = bool(shuffle_outer)
+        self.shuffle_inner = bool(shuffle_inner)
+
+        self.outer_splitter = outer_splitter_cls(
+            n_splits=self.k_outer,
+            shuffle=self.shuffle_outer,
+            random_state=self.random_state,
         )
 
     def _outer_fold_model_dir(self, outer_fold: int) -> Optional[str]:

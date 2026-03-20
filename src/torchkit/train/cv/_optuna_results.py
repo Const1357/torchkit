@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict, is_dataclass
+from dataclasses import dataclass, field, fields as dataclass_fields, is_dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -53,9 +53,86 @@ def _to_jsonable(x: Any) -> Any:
         return _tensor_summary(x)
 
     if is_dataclass(x):
-        return _to_jsonable(asdict(x))
+        return _to_jsonable(_snapshot_object(x))
 
     return repr(x)
+
+
+def _qualified_name(obj: Any) -> str:
+    cls = obj if isinstance(obj, type) else obj.__class__
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+
+def _snapshot_object(x: Any) -> Any:
+    if _is_json_primitive(x):
+        return x
+
+    if isinstance(x, Path):
+        return {"__kind__": "path", "value": str(x)}
+
+    if isinstance(x, dict):
+        return {str(k): _snapshot_object(v) for k, v in x.items()}
+
+    if isinstance(x, list):
+        return [_snapshot_object(v) for v in x]
+
+    if isinstance(x, tuple):
+        return {
+            "__kind__": "tuple",
+            "items": [_snapshot_object(v) for v in x],
+        }
+
+    if isinstance(x, set):
+        return {
+            "__kind__": "set",
+            "items": sorted(_snapshot_object(v) for v in x),
+        }
+
+    if torch.is_tensor(x):
+        return {
+            "__kind__": "tensor_summary",
+            **_tensor_summary(x),
+        }
+
+    if isinstance(x, type):
+        return {
+            "__kind__": "type",
+            "qualified_name": _qualified_name(x),
+            "repr": repr(x),
+        }
+
+    if callable(x) and hasattr(x, "__module__") and hasattr(x, "__qualname__"):
+        return {
+            "__kind__": "callable",
+            "qualified_name": f"{x.__module__}.{x.__qualname__}",
+            "repr": repr(x),
+        }
+
+    if is_dataclass(x):
+        return {
+            "__kind__": "dataclass",
+            "qualified_name": _qualified_name(x),
+            "fields": {
+                f.name: _snapshot_object(getattr(x, f.name))
+                for f in dataclass_fields(x)
+            },
+        }
+
+    state = None
+    if hasattr(x, "__dict__"):
+        state = {
+            str(k): _snapshot_object(v)
+            for k, v in vars(x).items()
+        }
+
+    out = {
+        "__kind__": "object",
+        "qualified_name": _qualified_name(x),
+        "repr": repr(x),
+    }
+    if state is not None:
+        out["state"] = state
+    return out
 
 
 def _flatten_dict(
@@ -301,7 +378,7 @@ class OptunaSearchCVResult:
             model=model,
         )
 
-    def successful_trials(self) -> list[OptunaTrialResult]:
+    def successful_trial_results(self) -> list[OptunaTrialResult]:
         return [tr for tr in self.trial_results if tr.status == "SUCCESS"]
 
     def selected_trial_result(self) -> OptunaTrialResult:
@@ -372,6 +449,11 @@ class OptunaSearchCVResult:
             out["base_trainer_spec_repr"] = None if self.base_trainer_spec is None else repr(self.base_trainer_spec)
             out["final_model_spec_repr"] = None if self.final_model_spec is None else repr(self.final_model_spec)
             out["final_trainer_spec_repr"] = None if self.final_trainer_spec is None else repr(self.final_trainer_spec)
+
+        out["base_model_spec"] = None if self.base_model_spec is None else _snapshot_object(self.base_model_spec)
+        out["base_trainer_spec"] = None if self.base_trainer_spec is None else _snapshot_object(self.base_trainer_spec)
+        out["final_model_spec"] = None if self.final_model_spec is None else _snapshot_object(self.final_model_spec)
+        out["final_trainer_spec"] = None if self.final_trainer_spec is None else _snapshot_object(self.final_trainer_spec)
 
         if include_tensors:
             out["final_model_state_dict_cpu"] = (
@@ -605,6 +687,9 @@ class NestedOptunaSearchCVResult:
         if include_specs_repr:
             out["base_model_spec_repr"] = None if self.base_model_spec is None else repr(self.base_model_spec)
             out["base_trainer_spec_repr"] = None if self.base_trainer_spec is None else repr(self.base_trainer_spec)
+
+        out["base_model_spec"] = None if self.base_model_spec is None else _snapshot_object(self.base_model_spec)
+        out["base_trainer_spec"] = None if self.base_trainer_spec is None else _snapshot_object(self.base_trainer_spec)
 
         return out
 

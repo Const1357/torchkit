@@ -7,6 +7,7 @@ import copy
 from torch.utils.data import DataLoader, Dataset
 
 from torchkit.data.split import KFoldSplitter
+from torchkit.models.Model._model import TorchkitModel
 from torchkit.models.Model.factory import TorchkitModelSpec
 from torchkit.train.cv._base_cv import BaseCV
 from torchkit.train.factory import TrainerFactory, TrainerSpec
@@ -50,18 +51,15 @@ class BaseSearchCV(BaseCV):
     def __init__(
         self,
         *,
-        model_spec: TorchkitModelSpec,
+        model_spec: TorchkitModelSpec | TorchkitModel,
         trainer_spec: TrainerSpec,
         parameter_grid: dict[str, Any],
-        outer_splitter_cls: type[KFoldSplitter],
-        inner_splitter_cls: Optional[type[KFoldSplitter]] = None,
+        splitter_cls: type[KFoldSplitter],
         dataloader_factory: Optional[Callable[[Dataset, bool], DataLoader]] = None,
         n_trials: int = 10,
         max_trial_attempts: Optional[int] = None,
-        k_outer: int = 5,
-        k_inner: Optional[int] = None,
-        shuffle_outer: bool = False,
-        shuffle_inner: bool = False,
+        n_splits: int = 5,
+        shuffle: bool = False,
         random_state: Optional[int] = None,
         calibrate: bool = True,
         final_model_dir: Optional[str] = None,
@@ -70,13 +68,10 @@ class BaseSearchCV(BaseCV):
         super().__init__(
             model_spec=model_spec,
             trainer_spec=trainer_spec,
-            outer_splitter_cls=outer_splitter_cls,
-            inner_splitter_cls=inner_splitter_cls,
+            splitter_cls=splitter_cls,
             dataloader_factory=dataloader_factory,
-            k_outer=k_outer,
-            k_inner=k_inner,
-            shuffle_outer=shuffle_outer,
-            shuffle_inner=shuffle_inner,
+            n_splits=n_splits,
+            shuffle=shuffle,
             random_state=random_state,
             calibrate=calibrate,
             final_model_dir=final_model_dir,

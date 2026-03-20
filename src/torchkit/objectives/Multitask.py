@@ -1,6 +1,11 @@
 from __future__ import annotations
-from typing import Any, Literal, override
+from typing import Any, Literal
 import warnings
+
+try:
+    from typing import override  # py3.12+
+except ImportError:
+    from typing_extensions import override  # py<=3.11
 
 import torch
 from torch import Tensor

@@ -10,6 +10,7 @@ import optuna
 
 from torchkit.data.split import StratifiedKFold, GroupKFold, StratifiedGroupKFold
 from torchkit.evaluate.select import AccuracySelectorEvaluator
+from torchkit.models.Model.factory import TorchkitModelFactory
 
 from torchkit.train.cv.optuna_search_cv import OptunaSearchCV
 from torchkit.train.cv._optuna_results import OptunaSearchCVResult
@@ -429,6 +430,88 @@ def test_optuna_search_cv_result_is_pickleable_and_reconstruction_survives_round
     assert "clf" in pred
     assert "logits" in pred["clf"]
     assert "calibrated_logits" in pred["clf"]
+
+
+def test_optuna_search_cv_final_model_reconstruction_is_prediction_identical(
+    tiny_dataset,
+    tiny_labels_groups,
+    tmp_path,
+):
+    y, _groups = tiny_labels_groups
+
+    model_spec = make_model_spec(scale_factor=1.0)
+    trainer_spec = make_trainer_spec(
+        evaluator=AccuracySelectorEvaluator(
+            score_key="clf/logits",
+            target_key="batch/y",
+            name="classification",
+        ),
+        max_epochs=2,
+    )
+
+    cv = make_optuna_search_cv(
+        model_spec=model_spec,
+        trainer_spec=trainer_spec,
+        splitter_cls=StratifiedKFold,
+        parameter_grid={"model/backbone/kwargs/scale_factor": ([1.0], "categorical")},
+        tmp_path=tmp_path,
+        n_trials=1,
+        max_trial_attempts=3,
+        n_splits=2,
+        random_state=None,
+        keep_final_model_state_dict_cpu=True,
+    )
+
+    result = cv.run(tiny_dataset, index=y, groups=None)
+
+    assert result.final_model_spec is not None
+    assert result.final_model_state_dict_cpu is not None
+    assert result.final_model_state_dict_path is not None
+
+    rebuilt_default = result.rebuild_final_model(device="cpu")
+    rebuilt_from_cpu = TorchkitModelFactory.build(
+        result.final_model_spec,
+        state_dict=result.final_model_state_dict_cpu,
+        device="cpu",
+    )
+    rebuilt_from_path = TorchkitModelFactory.build(
+        result.final_model_spec,
+        state_dict_path=result.final_model_state_dict_path,
+        device="cpu",
+    )
+
+    sample = tiny_dataset[0]
+    batched_sample = {
+        "x": sample["x"].unsqueeze(0),
+        "y": sample["y"].unsqueeze(0),
+    }
+
+    pred_default = rebuilt_default.predict(
+        batched_sample,
+        "clf",
+        return_raw_head_outputs=True,
+    )
+    pred_cpu = rebuilt_from_cpu.predict(
+        batched_sample,
+        "clf",
+        return_raw_head_outputs=True,
+    )
+    pred_path = rebuilt_from_path.predict(
+        batched_sample,
+        "clf",
+        return_raw_head_outputs=True,
+    )
+
+    assert torch.equal(pred_default["clf"]["logits"], pred_cpu["clf"]["logits"])
+    assert torch.equal(pred_default["clf"]["logits"], pred_path["clf"]["logits"])
+    assert torch.equal(
+        pred_default["clf"]["calibrated_logits"],
+        pred_cpu["clf"]["calibrated_logits"],
+    )
+    assert torch.equal(
+        pred_default["clf"]["calibrated_logits"],
+        pred_path["clf"]["calibrated_logits"],
+    )
 
 
 class FaultInjectingOptunaSearchCV(OptunaSearchCV):

@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader, Dataset, Subset
 
 from torchkit.data._dataset import TorchkitDataset
 from torchkit.data.split import KFoldSplitter
+from torchkit.models.Model._model import TorchkitModel
 from torchkit.models.Model.factory import TorchkitModelSpec
 from torchkit.train.factory import TrainerSpec
 from torchkit.train.trainer import Trainer
@@ -80,33 +81,44 @@ def _resolve_original_indices_for_subset(subset: Subset) -> list[int]:
 
 
 class BaseCV:
+    @staticmethod
+    def _coerce_model_spec(model_spec: TorchkitModelSpec | TorchkitModel) -> TorchkitModelSpec:
+        if isinstance(model_spec, TorchkitModelSpec):
+            return copy.deepcopy(model_spec)
+
+        if isinstance(model_spec, TorchkitModel):
+            spec = model_spec.to_spec()
+            if not isinstance(spec, TorchkitModelSpec):
+                raise TypeError(
+                    f"{model_spec.__class__.__name__}.to_spec() must return TorchkitModelSpec."
+                )
+            return copy.deepcopy(spec)
+
+        raise TypeError(
+            "`model_spec` must be a TorchkitModelSpec or a live TorchkitModel instance, "
+            f"got {type(model_spec).__name__}."
+        )
+
     def __init__(
         self,
         *,
-        model_spec: TorchkitModelSpec,
+        model_spec: TorchkitModelSpec | TorchkitModel,
         trainer_spec: TrainerSpec,
-        outer_splitter_cls: type[KFoldSplitter],
-        inner_splitter_cls: Optional[type[KFoldSplitter]] = None,
+        splitter_cls: type[KFoldSplitter],
         dataloader_factory: Optional[Callable[[Dataset, bool], DataLoader]] = None,
-        k_outer: int = 5,
-        k_inner: Optional[int] = None,
-        shuffle_outer: bool = False,
-        shuffle_inner: bool = False,
+        n_splits: int = 5,
+        shuffle: bool = False,
         random_state: Optional[int] = None,
         calibrate: bool = True,
         final_model_dir: Optional[str] = None,
         keep_final_model_state_dict_cpu: bool = True,
     ):
-        self.model_spec = copy.deepcopy(model_spec)
+        self.model_spec = self._coerce_model_spec(model_spec)
         self.trainer_spec = copy.deepcopy(trainer_spec)
 
-        self.outer_splitter_cls = outer_splitter_cls
-        self.inner_splitter_cls = inner_splitter_cls
-
-        self.k_outer = int(k_outer)
-        self.k_inner = int(k_inner) if k_inner is not None else None
-        self.shuffle_outer = bool(shuffle_outer)
-        self.shuffle_inner = bool(shuffle_inner)
+        self.splitter_cls = splitter_cls
+        self.n_splits = int(n_splits)
+        self.shuffle = bool(shuffle)
         self.random_state = random_state
 
         self.calibrate = bool(calibrate)
@@ -122,22 +134,11 @@ class BaseCV:
                 "keep_final_model_state_dict_cpu is False."
             )
 
-        self.outer_splitter = outer_splitter_cls(
-            n_splits=self.k_outer,
-            shuffle=self.shuffle_outer,
+        self.splitter = splitter_cls(
+            n_splits=self.n_splits,
+            shuffle=self.shuffle,
             random_state=self.random_state,
         )
-
-        self.inner_splitter = None
-        if inner_splitter_cls is not None:
-            if self.k_inner is None:
-                raise ValueError("k_inner must be provided when inner_splitter_cls is provided.")
-
-            self.inner_splitter = inner_splitter_cls(
-                n_splits=self.k_inner,
-                shuffle=self.shuffle_inner,
-                random_state=self.random_state,
-            )
 
         if dataloader_factory is None:
             self.dataloader_factory = lambda ds, shuffle: DataLoader(ds, batch_size=1, shuffle=shuffle)

@@ -68,15 +68,12 @@ class OptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
             model_spec=model_spec,
             trainer_spec=trainer_spec,
             parameter_grid=parameter_grid,
-            outer_splitter_cls=splitter_cls,
-            inner_splitter_cls=None,
+            splitter_cls=splitter_cls,
             dataloader_factory=dataloader_factory,
             n_trials=n_trials,
             max_trial_attempts=max_trial_attempts,
-            k_outer=n_splits,
-            k_inner=None,
-            shuffle_outer=shuffle,
-            shuffle_inner=False,
+            n_splits=n_splits,
+            shuffle=shuffle,
             random_state=random_state,
             calibrate=calibrate,
             final_model_dir=final_model_dir,
@@ -104,7 +101,7 @@ class OptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
         aggregate_oof_sample_indices: list[int] = []
 
         for fold, (train_subset, val_subset) in enumerate(
-            self._split(self.outer_splitter, search_dataset, search_index, search_groups)
+            self._split(self.splitter, search_dataset, search_index, search_groups)
         ):
             if not isinstance(train_subset, Subset) or not isinstance(val_subset, Subset):
                 raise TypeError(
@@ -385,9 +382,9 @@ class OptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
             base_model_spec=copy.deepcopy(self.model_spec),
             base_trainer_spec=copy.deepcopy(self.trainer_spec),
             parameter_grid=copy.deepcopy(self.parameter_grid),
-            splitter_name=self.outer_splitter_cls.__name__,
-            n_splits=self.k_outer,
-            shuffle=self.shuffle_outer,
+            splitter_name=self.splitter_cls.__name__,
+            n_splits=self.n_splits,
+            shuffle=self.shuffle,
             random_state=self.random_state,
             n_trials=self.n_trials,
             max_trial_attempts=self.max_trial_attempts,

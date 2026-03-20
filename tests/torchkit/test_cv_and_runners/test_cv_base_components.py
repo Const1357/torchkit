@@ -11,6 +11,7 @@ from torch.utils.data import Subset
 
 from torchkit.data.split import StratifiedKFold
 from torchkit.evaluate.select import AccuracySelectorEvaluator
+from torchkit.models.Model.factory import TorchkitModelFactory
 from torchkit.train.cv._base_cv import (
     BaseCV,
     _safe_take,
@@ -48,6 +49,32 @@ class MinimalBaseSearchCV(BaseSearchCV):
 
 class MinimalOptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
     pass
+
+
+def test_base_cv_accepts_live_model_and_coerces_to_spec(tmp_path):
+    live_model = TorchkitModelFactory.build(make_model_spec(scale_factor=1.0))
+    trainer_spec = make_trainer_spec(
+        evaluator=AccuracySelectorEvaluator(
+            score_key="clf/logits",
+            target_key="batch/y",
+            name="classification",
+        )
+    )
+
+    cv = MinimalBaseCV(
+        model_spec=live_model,
+        trainer_spec=trainer_spec,
+        splitter_cls=StratifiedKFold,
+        n_splits=2,
+        final_model_dir=str(tmp_path / "live_model"),
+    )
+
+    assert cv.model_spec.backbone is not None
+    assert cv.model_spec.backbone.cls is live_model.backbone.__class__
+    assert cv.model_spec.heads["clf"].required_features == "features"
+    assert cv.splitter_cls is StratifiedKFold
+    assert cv.n_splits == 2
+    assert not hasattr(cv, "inner_splitter")
 
 
 def test_safe_take_supports_list_and_tensor():
@@ -115,21 +142,23 @@ def test_base_cv_selection_metric_helpers_maximize_and_minimize(tmp_path):
     max_cv = MinimalBaseCV(
         model_spec=model_spec,
         trainer_spec=max_trainer_spec,
-        outer_splitter_cls=StratifiedKFold,
-        k_outer=2,
+        splitter_cls=StratifiedKFold,
+        n_splits=2,
         final_model_dir=str(tmp_path / "max"),
     )
     min_cv = MinimalBaseCV(
         model_spec=model_spec,
         trainer_spec=min_trainer_spec,
-        outer_splitter_cls=StratifiedKFold,
-        k_outer=2,
+        splitter_cls=StratifiedKFold,
+        n_splits=2,
         final_model_dir=str(tmp_path / "min"),
     )
 
     assert max_cv._selection_metric_name() == "dataset:classification"
     assert max_cv._selection_metric_direction() == "maximize"
     assert max_cv._to_selection_score(0.8) == pytest.approx(0.8)
+    assert max_cv.splitter_cls is StratifiedKFold
+    assert max_cv.n_splits == 2
 
     assert min_cv._selection_metric_name() == "dataset:error_rate"
     assert min_cv._selection_metric_direction() == "maximize"
@@ -150,8 +179,8 @@ def test_base_cv_rejects_unrebuildable_configuration():
         MinimalBaseCV(
             model_spec=model_spec,
             trainer_spec=trainer_spec,
-            outer_splitter_cls=StratifiedKFold,
-            k_outer=2,
+            splitter_cls=StratifiedKFold,
+            n_splits=2,
             final_model_dir=None,
             keep_final_model_state_dict_cpu=False,
         )
@@ -175,8 +204,8 @@ def test_base_search_cv_routes_parameters_into_real_specs(tmp_path):
             "model/backbone/kwargs/scale_factor": ([1.0], "categorical"),
             "trainer/config/max_epochs": ([4], "categorical"),
         },
-        outer_splitter_cls=StratifiedKFold,
-        k_outer=2,
+        splitter_cls=StratifiedKFold,
+        n_splits=2,
         final_model_dir=str(tmp_path),
     )
 
@@ -190,6 +219,38 @@ def test_base_search_cv_routes_parameters_into_real_specs(tmp_path):
     assert built_model_spec.backbone.kwargs["scale_factor"] == -1.0
     assert built_trainer_spec.config.max_epochs == 7
     assert trainer.config.max_epochs == 7
+
+
+def test_base_search_cv_accepts_live_model_and_builds_trial_trainer(tmp_path):
+    live_model = TorchkitModelFactory.build(make_model_spec(scale_factor=1.0))
+    trainer_spec = make_trainer_spec(
+        evaluator=AccuracySelectorEvaluator(
+            score_key="clf/logits",
+            target_key="batch/y",
+            name="classification",
+        ),
+        max_epochs=2,
+    )
+
+    cv = MinimalBaseSearchCV(
+        model_spec=live_model,
+        trainer_spec=trainer_spec,
+        parameter_grid={
+            "trainer/config/max_epochs": ([4], "categorical"),
+        },
+        splitter_cls=StratifiedKFold,
+        n_splits=2,
+        final_model_dir=str(tmp_path / "search_live_model"),
+    )
+
+    built_model_spec, built_trainer_spec, trainer = cv._build_trainer_for_trial(
+        params={"trainer/config/max_epochs": 5}
+    )
+
+    assert built_model_spec.backbone is not None
+    assert built_model_spec.backbone.cls is live_model.backbone.__class__
+    assert built_trainer_spec.config.max_epochs == 5
+    assert trainer.config.max_epochs == 5
 
 
 def test_optuna_search_mixin_suggest_parameters():
@@ -251,10 +312,18 @@ def test_results_containers_support_offline_processing_and_reconstruction(
     d = result.to_dict()
     assert isinstance(d, dict)
     assert d["best_trial_number"] == 0
+    assert d["base_model_spec"] is not None
+    assert d["base_trainer_spec"] is not None
+    assert d["final_model_spec"] is not None
+    assert d["final_trainer_spec"] is not None
 
     j = result.to_json()
     parsed = json.loads(j)
     assert parsed["best_trial_number"] == 0
+    assert parsed["base_model_spec"] is not None
+    assert parsed["base_trainer_spec"] is not None
+    assert parsed["final_model_spec"] is not None
+    assert parsed["final_trainer_spec"] is not None
 
     trials_df = result.trials_to_dataframe()
     folds_df = result.folds_to_dataframe()
@@ -331,10 +400,14 @@ def test_nested_results_support_offline_processing_and_reconstruction(
     d = result.to_dict()
     assert isinstance(d, dict)
     assert len(d["outer_results"]) == 2
+    assert d["base_model_spec"] is not None
+    assert d["base_trainer_spec"] is not None
 
     j = result.to_json()
     parsed = json.loads(j)
     assert len(parsed["outer_results"]) == 2
+    assert parsed["base_model_spec"] is not None
+    assert parsed["base_trainer_spec"] is not None
 
     outer_df = result.outer_folds_to_dataframe()
     lb_row = result.leaderboard_row()
