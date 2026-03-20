@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 import copy
 
 import torch
@@ -30,6 +30,14 @@ def _scheduler_expects_metric(sched: object) -> bool:
     return isinstance(sched, torch.optim.lr_scheduler.ReduceLROnPlateau)
 
 
+def _scheduler_cls_expects_metric(
+    scheduler_cls: Optional[type[torch.optim.lr_scheduler._LRScheduler | torch.optim.lr_scheduler.ReduceLROnPlateau]],
+) -> bool:
+    if scheduler_cls is None:
+        return False
+    return issubclass(scheduler_cls, torch.optim.lr_scheduler.ReduceLROnPlateau)
+
+
 @dataclass(frozen=False)
 class TrainerConfig:
     device: Optional[str | torch.device] = None
@@ -43,6 +51,7 @@ class TrainerConfig:
 
     scheduler_cls: Optional[type[torch.optim.lr_scheduler._LRScheduler | torch.optim.lr_scheduler.ReduceLROnPlateau]] = None
     scheduler_kwargs: Optional[dict[str, Any]] = None
+    scheduler_monitor: Optional[Literal["val_loss", "selector_metric"]] = None
 
     use_amp: bool = False
     grad_clip_norm: Optional[float] = None
@@ -269,6 +278,71 @@ class Trainer:
 
         self.state.train_logs.append(epoch_log)
         return epoch_log
+
+    def _selector_monitor_direction(self) -> MetricDirection:
+        selector_bundle = getattr(self, "selector_evaluator", None)
+        if selector_bundle is None:
+            raise ValueError(
+                "scheduler_monitor='selector_metric' requires `selector_evaluator` to be provided."
+            )
+        return "maximize"
+
+    def _validate_scheduler_monitor_config(self) -> None:
+        if not _scheduler_cls_expects_metric(self.config.scheduler_cls):
+            return
+
+        monitor = self.config.scheduler_monitor
+        if monitor is None:
+            raise ValueError(
+                "ReduceLROnPlateau requires `scheduler_monitor` to be set to "
+                "'val_loss' or 'selector_metric'."
+            )
+        if monitor == "selector_metric" and self.selector_evaluator is None:
+            raise ValueError(
+                "scheduler_monitor='selector_metric' requires `selector_evaluator` to be provided."
+            )
+
+    def _resolve_scheduler_monitor_value(self, val_log: dict[str, Any]) -> float:
+        import math
+        import numbers
+
+        monitor = self.config.scheduler_monitor
+        if monitor == "val_loss":
+            value = val_log.get("val_loss", None)
+            direction: MetricDirection = "minimize"
+        elif monitor == "selector_metric":
+            if "val/primary" not in val_log:
+                raise ValueError(
+                    "scheduler_monitor='selector_metric' requires a finite selector metric, "
+                    "but validation did not produce 'val/primary'."
+                )
+            value = val_log["val/primary"]
+            direction = self._selector_monitor_direction()
+        else:
+            raise ValueError(
+                f"Unsupported scheduler_monitor {monitor!r}. Expected 'val_loss' or 'selector_metric'."
+            )
+
+        if isinstance(value, bool) or not isinstance(value, numbers.Number):
+            raise TypeError(
+                f"Scheduler monitor {monitor!r} must resolve to a numeric scalar, got {type(value).__name__}."
+            )
+
+        resolved_value = float(value)
+        if not math.isfinite(resolved_value):
+            raise ValueError(
+                f"Scheduler monitor {monitor!r} resolved to non-finite value {resolved_value}."
+            )
+
+        scheduler_mode = getattr(self.scheduler, "mode", "min")
+        if scheduler_mode not in ("min", "max"):
+            raise ValueError(f"Unsupported ReduceLROnPlateau mode {scheduler_mode!r}.")
+
+        if direction == "minimize":
+            return resolved_value if scheduler_mode == "min" else -resolved_value
+        if direction == "maximize":
+            return -resolved_value if scheduler_mode == "min" else resolved_value
+        raise ValueError(f"Unsupported monitor direction {direction!r}.")
 
     def _validate_one_epoch(
         self,
@@ -678,7 +752,7 @@ class Trainer:
                     val_log = self._validate_one_epoch(val_loader, epoch=ep)
 
                     if self.scheduler is not None and _scheduler_expects_metric(self.scheduler):
-                        self.scheduler.step(val_log["val_loss"])
+                        self.scheduler.step(self._resolve_scheduler_monitor_value(val_log))
 
                     if trial is not None and (ep % report_every == 0):
                         score = val_log.get("__selection_score__", None)
@@ -757,6 +831,8 @@ class Trainer:
         rebuild_scheduler: bool = True,
         rebuild_scaler: bool = True,
     ) -> None:
+        self._validate_scheduler_monitor_config()
+
         if rebuild_optimizer:
             self.optimizer = self.config.optimizer_cls(self.model.parameters(), **self.config.optimizer_kwargs)
 

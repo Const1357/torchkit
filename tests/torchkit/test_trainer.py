@@ -221,6 +221,18 @@ class BadDatasetEvaluator(SelectorEvaluator):
         return "not a dict"
 
 
+class NaNDatasetEvaluator(SelectorEvaluator):
+    def __init__(self):
+        super().__init__(name="nan_dataset", direction="maximize", weight=1.0)
+
+    @property
+    def required_keys(self) -> tuple[str, ...]:
+        return ("clf/logits",)
+
+    def primary_metric(self, *, inputs: dict[str, object]) -> Tensor:
+        return torch.tensor(float("nan"))
+
+
 # ============================================================
 # Trial stub
 # ============================================================
@@ -624,6 +636,36 @@ def test_trainer_scheduler_step_metric_aware(
             optimizer_kwargs={"lr": 0.1},
             scheduler_cls=torch.optim.lr_scheduler.ReduceLROnPlateau,
             scheduler_kwargs={"patience": 0, "factor": 0.5},
+            scheduler_monitor="val_loss",
+        ),
+    )
+
+    trainer.fit(train_loader, val_loader)
+    assert trainer.scheduler is not None
+
+
+def test_trainer_scheduler_step_metric_aware_selector_monitor(
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+):
+    model = make_classification_model(with_prediction_head=False)
+    objective = CELoss(
+        input_path="clf/logits",
+        target_path="batch/y",
+        reduction="mean",
+    )
+    trainer = Trainer(
+        model=model,
+        objective=objective,
+        selector_evaluator=BundleSelectorEvaluator(dataset_evaluator=DatasetAccuracyEvaluator()),
+        config=TrainerConfig(
+            device="cpu",
+            max_epochs=2,
+            optimizer_cls=torch.optim.SGD,
+            optimizer_kwargs={"lr": 0.1},
+            scheduler_cls=torch.optim.lr_scheduler.ReduceLROnPlateau,
+            scheduler_kwargs={"mode": "min", "patience": 0, "factor": 0.5},
+            scheduler_monitor="selector_metric",
         ),
     )
 
@@ -704,6 +746,80 @@ def test_trainer_init_with_bad_scheduler_kwargs_raises():
                 scheduler_kwargs={},  # missing step_size
             ),
         )
+
+
+def test_trainer_init_with_reduce_on_plateau_without_scheduler_monitor_raises():
+    model = make_classification_model(with_prediction_head=False)
+    objective = CELoss(
+        input_path="clf/logits",
+        target_path="batch/y",
+        reduction="mean",
+    )
+
+    with pytest.raises(ValueError, match="requires `scheduler_monitor`"):
+        Trainer(
+            model=model,
+            objective=objective,
+            config=TrainerConfig(
+                device="cpu",
+                optimizer_cls=torch.optim.SGD,
+                optimizer_kwargs={"lr": 0.1},
+                scheduler_cls=torch.optim.lr_scheduler.ReduceLROnPlateau,
+                scheduler_kwargs={"patience": 0, "factor": 0.5},
+            ),
+        )
+
+
+def test_trainer_init_with_selector_monitor_and_no_selector_evaluator_raises():
+    model = make_classification_model(with_prediction_head=False)
+    objective = CELoss(
+        input_path="clf/logits",
+        target_path="batch/y",
+        reduction="mean",
+    )
+
+    with pytest.raises(ValueError, match="requires `selector_evaluator`"):
+        Trainer(
+            model=model,
+            objective=objective,
+            config=TrainerConfig(
+                device="cpu",
+                optimizer_cls=torch.optim.SGD,
+                optimizer_kwargs={"lr": 0.1},
+                scheduler_cls=torch.optim.lr_scheduler.ReduceLROnPlateau,
+                scheduler_kwargs={"patience": 0, "factor": 0.5},
+                scheduler_monitor="selector_metric",
+            ),
+        )
+
+
+def test_trainer_fit_with_nonfinite_selector_scheduler_monitor_raises(
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+):
+    model = make_classification_model(with_prediction_head=False)
+    objective = CELoss(
+        input_path="clf/logits",
+        target_path="batch/y",
+        reduction="mean",
+    )
+    trainer = Trainer(
+        model=model,
+        objective=objective,
+        selector_evaluator=BundleSelectorEvaluator(dataset_evaluator=NaNDatasetEvaluator()),
+        config=TrainerConfig(
+            device="cpu",
+            max_epochs=1,
+            optimizer_cls=torch.optim.SGD,
+            optimizer_kwargs={"lr": 0.1},
+            scheduler_cls=torch.optim.lr_scheduler.ReduceLROnPlateau,
+            scheduler_kwargs={"patience": 0, "factor": 0.5},
+            scheduler_monitor="selector_metric",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="finite selector metric"):
+        trainer.fit(train_loader, val_loader)
 
 
 def test_trainer_fit_rejects_nonpositive_max_epochs(
