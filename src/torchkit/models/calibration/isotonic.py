@@ -4,11 +4,13 @@ import torch
 from torch import Tensor
 
 from torchkit.models.calibration._calibrator import Calibrator
+from torchkit.models._spec_utils import normalize_spec_kwargs
 
 
 class IsotonicRegressionCalibrator(Calibrator):
     def __init__(self, eps: float = 1e-6, active: bool = False):
         super().__init__(active=active)
+        self._spec_kwargs = normalize_spec_kwargs({"eps": eps})
 
         if not (0.0 < eps < 0.5):
             raise ValueError(f"eps must be in (0, 0.5), got {eps}.")
@@ -112,3 +114,6 @@ class IsotonicRegressionCalibrator(Calibrator):
 
         self.x_thresholds = x_thresholds
         self.y_thresholds = y_thresholds
+
+    def to_spec(self):
+        return super().to_spec()

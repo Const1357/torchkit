@@ -4,6 +4,7 @@ from torch import Tensor
 import torch
 
 from torchkit.models.decision._decision_module import DecisionModule
+from torchkit.models._spec_utils import normalize_spec_kwargs
 
 
 class BinarySegmentationThreshold(DecisionModule):
@@ -20,6 +21,7 @@ class BinarySegmentationThreshold(DecisionModule):
 
     def __init__(self, threshold: float = 0.5):
         super().__init__()
+        self._spec_kwargs = normalize_spec_kwargs({"threshold": threshold})
 
         if not 0.0 <= threshold <= 1.0:
             raise ValueError(f"threshold must be in [0, 1], got {threshold}.")
@@ -57,3 +59,11 @@ class BinarySegmentationThreshold(DecisionModule):
             )
 
         return (p_pos >= self.threshold).to(dtype=torch.long)
+
+    def to_spec(self):
+        from torchkit.models.decision.factory import DecisionModuleSpec
+
+        return DecisionModuleSpec(
+            cls=self.__class__,
+            kwargs={"threshold": self.threshold},
+        )

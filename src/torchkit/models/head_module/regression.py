@@ -2,11 +2,19 @@ from __future__ import annotations
 
 from torch import nn, Tensor
 
+from torchkit.models._spec_utils import normalize_spec_kwargs
+
 
 class RegressorHeadLinear(nn.Module):
 
     def __init__(self, input_dim: int, n_targets: int = 1):
         super().__init__()
+        self._spec_kwargs = normalize_spec_kwargs(
+            {
+                "input_dim": input_dim,
+                "n_targets": n_targets,
+            }
+        )
         if n_targets <= 0:
             raise ValueError(f"`n_targets` must be positive, got {n_targets}.")
         self.linear = nn.Linear(input_dim, n_targets)
@@ -15,6 +23,14 @@ class RegressorHeadLinear(nn.Module):
     def forward(self, x: Tensor) -> dict[str, Tensor]:
         # Output shape: (B, n_targets)
         return {f"predictions": self.linear(x)}
+
+    def to_spec(self):
+        from torchkit.models.head_module.factory import HeadModuleSpec
+
+        return HeadModuleSpec(
+            cls=self.__class__,
+            kwargs=normalize_spec_kwargs(self._spec_kwargs),
+        )
 
 
 class RegressorHeadMLP(nn.Module):
@@ -30,6 +46,16 @@ class RegressorHeadMLP(nn.Module):
         dropout: float = 0.0,
     ):
         super().__init__()
+        self._spec_kwargs = normalize_spec_kwargs(
+            {
+                "input_dim": input_dim,
+                "hidden_dims": hidden_dims,
+                "n_targets": n_targets,
+                "activation": activation,
+                "norm": norm,
+                "dropout": dropout,
+            }
+        )
 
         if len(hidden_dims) == 0:
             raise ValueError(
@@ -65,3 +91,11 @@ class RegressorHeadMLP(nn.Module):
     def forward(self, x: Tensor) -> dict[str, Tensor]:
         # Output shape: (B, n_targets)
         return {f"predictions": self.mlp(x)}
+
+    def to_spec(self):
+        from torchkit.models.head_module.factory import HeadModuleSpec
+
+        return HeadModuleSpec(
+            cls=self.__class__,
+            kwargs=normalize_spec_kwargs(self._spec_kwargs),
+        )

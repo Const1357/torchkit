@@ -410,3 +410,36 @@ class TorchkitModel(nn.Module):
         finally:
             self.disable_head(self.head_names)
             self.enable_head(previous_active_heads)
+
+    def to_spec(self):
+        from torchkit.models.Model.factory import TorchkitModelSpec
+        from torchkit.models.backbone.factory import BackboneSpec
+        from torchkit.models.head.factory import TaskHeadSpec
+        from torchkit.models.prediction.factory import PredictionHeadSpec
+
+        backbone = self.backbone.to_spec()
+        if not isinstance(backbone, BackboneSpec):
+            raise TypeError(f"{self.backbone.__class__.__name__}.to_spec() must return BackboneSpec.")
+
+        heads = {name: head.to_spec() for name, head in self.heads.items()}
+        for name, head_spec in heads.items():
+            if not isinstance(head_spec, TaskHeadSpec):
+                raise TypeError(f"Head {name!r} to_spec() must return TaskHeadSpec.")
+
+        prediction_heads = None
+        if len(self.prediction_heads) > 0:
+            prediction_heads = {
+                name: prediction_head.to_spec()
+                for name, prediction_head in self.prediction_heads.items()
+            }
+            for name, prediction_head_spec in prediction_heads.items():
+                if not isinstance(prediction_head_spec, PredictionHeadSpec):
+                    raise TypeError(
+                        f"Prediction head {name!r} to_spec() must return PredictionHeadSpec."
+                    )
+
+        return TorchkitModelSpec(
+            backbone=backbone,
+            heads=heads,
+            prediction_heads=prediction_heads,
+        )

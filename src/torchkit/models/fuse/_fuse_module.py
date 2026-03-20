@@ -11,6 +11,8 @@ except ImportError:
 import torch
 from torch import Tensor, nn
 
+from torchkit.models._spec_utils import normalize_spec_kwargs, resolve_spec_kwargs
+
 
 class FuseModule(nn.Module, ABC):
     """
@@ -38,6 +40,14 @@ class FuseModule(nn.Module, ABC):
             "Subclasses of FuseModule must implement forward(features: dict[str, Tensor], **kwargs) -> Tensor."
         )
 
+    def to_spec(self):
+        from torchkit.models.fuse.factory import FuseModuleSpec
+
+        return FuseModuleSpec(
+            cls=self.__class__,
+            kwargs=resolve_spec_kwargs(self),
+        )
+
 
 class ConcatFuseModule(FuseModule):
     """
@@ -54,6 +64,7 @@ class ConcatFuseModule(FuseModule):
     def __init__(self, *, dim: int = 1):
         super().__init__()
         self.dim = dim
+        self._spec_kwargs = normalize_spec_kwargs({"dim": dim})
 
     @override
     def forward(self, features: dict[str, Tensor], **kwargs: Any) -> Tensor:
@@ -61,6 +72,9 @@ class ConcatFuseModule(FuseModule):
             raise ValueError("ConcatFuseModule expects a non-empty dict[str, Tensor].")
         vals = list(features.values())
         return torch.cat(vals, dim=self.dim)
+
+    def to_spec(self):
+        return super().to_spec()
 
 
 class SumFuseModule(FuseModule):
@@ -78,6 +92,7 @@ class SumFuseModule(FuseModule):
     def __init__(self, *, stack_dim: int = 0):
         super().__init__()
         self.stack_dim = stack_dim
+        self._spec_kwargs = normalize_spec_kwargs({"stack_dim": stack_dim})
 
     @override
     def forward(self, features: dict[str, Tensor], **kwargs: Any) -> Tensor:
@@ -85,6 +100,9 @@ class SumFuseModule(FuseModule):
             raise ValueError("SumFuseModule expects a non-empty dict[str, Tensor].")
         vals = list(features.values())
         return torch.stack(vals, dim=self.stack_dim).sum(dim=self.stack_dim)
+
+    def to_spec(self):
+        return super().to_spec()
 
 
 class TabularConcatFuseModule(FuseModule):
@@ -116,6 +134,12 @@ class TabularConcatFuseModule(FuseModule):
             raise TypeError("`tabular_key` must be a non-empty str.")
         self.tabular_key = tabular_key
         self.dim = dim
+        self._spec_kwargs = normalize_spec_kwargs(
+            {
+                "tabular_key": tabular_key,
+                "dim": dim,
+            }
+        )
 
     @override
     def forward(
@@ -159,3 +183,6 @@ class TabularConcatFuseModule(FuseModule):
             )
 
         return torch.cat([x, tab], dim=self.dim)
+
+    def to_spec(self):
+        return super().to_spec()

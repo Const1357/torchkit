@@ -3,6 +3,8 @@ from abc import ABC, abstractmethod
 
 from torch import nn, Tensor
 
+from torchkit.models._spec_utils import resolve_spec_kwargs
+
 
 class Calibrator(nn.Module, ABC):
     # subclass of nn.Module does not necessarily mean neural network.
@@ -77,3 +79,12 @@ class Calibrator(nn.Module, ABC):
     @abstractmethod
     def fit_impl(self, logits: Tensor, targets: Tensor) -> None:
         raise NotImplementedError(f"{self.__class__.__name__} must implement `fit_impl` method for learning calibration parameters from logits and targets.")
+
+    def to_spec(self):
+        from torchkit.models.calibration.factory import CalibratorSpec
+
+        return CalibratorSpec(
+            cls=self.__class__,
+            kwargs=resolve_spec_kwargs(self),
+            active=self.is_active,
+        )

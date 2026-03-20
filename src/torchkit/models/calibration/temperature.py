@@ -4,11 +4,19 @@ import torch
 from torch import Tensor, nn
 
 from torchkit.models.calibration._calibrator import Calibrator
+from torchkit.models._spec_utils import normalize_spec_kwargs
 
 
 class TemperatureScalingCalibrator(Calibrator):
     def __init__(self, init_temp: float = 1.0, max_iter: int = 50, lr: float = 0.01, active: bool = False):
         super().__init__(active=active)
+        self._spec_kwargs = normalize_spec_kwargs(
+            {
+                "init_temp": init_temp,
+                "max_iter": max_iter,
+                "lr": lr,
+            }
+        )
 
         if init_temp <= 0:
             raise ValueError(f"init_temp must be > 0, got {init_temp}.")
@@ -53,3 +61,6 @@ class TemperatureScalingCalibrator(Calibrator):
 
         with torch.no_grad():
             self.temperature.clamp_(min=1e-6)
+
+    def to_spec(self):
+        return super().to_spec()

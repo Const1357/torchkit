@@ -40,3 +40,6 @@ class SegmentationProbabilityMapper(ProbabilityMapper):
             f"{self.__class__.__name__} received invalid channel dimension {n_channels} "
             f"for input shape {tuple(mask.shape)}."
         )
+
+    def to_spec(self):
+        return super().to_spec()

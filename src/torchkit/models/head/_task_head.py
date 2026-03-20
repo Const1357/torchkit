@@ -6,6 +6,7 @@ from warnings import warn
 
 from torchkit.models.adapters import FeatureAdapter
 from torchkit.models.fuse import FuseModule
+from torchkit.models._spec_utils import resolve_spec_kwargs
 
 import inspect
 
@@ -186,3 +187,58 @@ class TaskHead(nn.Module):
             raise RuntimeError(f"Active TaskHead {self.__class__.__name__} produced None output.")
         
         return x
+
+    def to_spec(self):
+        from torchkit.models.adapters.factory import FeatureAdapterSpec
+        from torchkit.models.fuse.factory import FuseModuleSpec
+        from torchkit.models.head.factory import TaskHeadSpec
+        from torchkit.models.head_module.factory import HeadModuleSpec
+
+        if len(self.required_features) == 1:
+            required_features = next(iter(self.required_features))
+        else:
+            required_features = tuple(sorted(self.required_features))
+
+        fuse_module = None
+        if self.fuse_module is not None:
+            fuse_module = self.fuse_module.to_spec()
+            if not isinstance(fuse_module, FuseModuleSpec):
+                raise TypeError(
+                    f"{self.fuse_module.__class__.__name__}.to_spec() must return FuseModuleSpec."
+                )
+
+        feature_adapter = None
+        if self.feature_adapter is not None and not isinstance(self.feature_adapter, nn.Identity):
+            if hasattr(self.feature_adapter, "to_spec"):
+                feature_adapter = self.feature_adapter.to_spec()
+            else:
+                feature_adapter = FeatureAdapterSpec(
+                    cls=self.feature_adapter.__class__,
+                    kwargs=resolve_spec_kwargs(self.feature_adapter),
+                )
+            if not isinstance(feature_adapter, FeatureAdapterSpec):
+                raise TypeError(
+                    f"{self.feature_adapter.__class__.__name__}.to_spec() must return FeatureAdapterSpec."
+                )
+
+        head_module = None
+        if self.head_module is not None and not isinstance(self.head_module, nn.Identity):
+            if hasattr(self.head_module, "to_spec"):
+                head_module = self.head_module.to_spec()
+            else:
+                head_module = HeadModuleSpec(
+                    cls=self.head_module.__class__,
+                    kwargs=resolve_spec_kwargs(self.head_module),
+                )
+            if not isinstance(head_module, HeadModuleSpec):
+                raise TypeError(
+                    f"{self.head_module.__class__.__name__}.to_spec() must return HeadModuleSpec."
+                )
+
+        return TaskHeadSpec(
+            required_features=required_features,
+            fuse_module=fuse_module,
+            feature_adapter=feature_adapter,
+            head_module=head_module,
+            active=self.is_active,
+        )

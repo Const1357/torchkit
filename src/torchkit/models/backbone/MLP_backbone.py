@@ -3,6 +3,7 @@ from typing import Any, Collection, Optional
 
 from torch import nn, Tensor
 from torchkit.models.backbone._backbone import Backbone
+from torchkit.models._spec_utils import normalize_spec_kwargs
 
 class MLPBackbone(Backbone):
     """A simple MLP backbone that produces a single feature map. Serves as a minimal example and a template for custom backbones."""
@@ -18,6 +19,16 @@ class MLPBackbone(Backbone):
         dropout: float = 0.0,
     ):
         super().__init__(supported_features=["features"])
+        self._spec_kwargs = normalize_spec_kwargs(
+            {
+                "input_dim": input_dim,
+                "hidden_dims": hidden_dims,
+                "output_dim": output_dim,
+                "activation": activation,
+                "norm": norm,
+                "dropout": dropout,
+            }
+        )
 
         layers: list[nn.Module] = []
         prev_dim = input_dim
@@ -37,3 +48,6 @@ class MLPBackbone(Backbone):
         x = input.get("x")  # convention: backbone input is always under key "x"
         features = self.mlp(x)
         return {"features": features}
+
+    def to_spec(self):
+        return super().to_spec()

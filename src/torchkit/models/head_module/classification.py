@@ -3,17 +3,33 @@ from typing import Optional
 
 from torch import nn, Tensor
 
+from torchkit.models._spec_utils import normalize_spec_kwargs
+
 
 class ClassifierHeadLinear(nn.Module):
 
     def __init__(self, input_dim: int, num_classes: int):
         super().__init__()
+        self._spec_kwargs = normalize_spec_kwargs(
+            {
+                "input_dim": input_dim,
+                "num_classes": num_classes,
+            }
+        )
         self.linear = nn.Linear(input_dim, num_classes)
         self.n_output = num_classes
 
     def forward(self, x: Tensor) -> dict[str, Tensor]:
         logits = self.linear(x)
         return {"logits": logits}
+
+    def to_spec(self):
+        from torchkit.models.head_module.factory import HeadModuleSpec
+
+        return HeadModuleSpec(
+            cls=self.__class__,
+            kwargs=normalize_spec_kwargs(self._spec_kwargs),
+        )
 
 
 class ClassifierHeadMLP(nn.Module):
@@ -34,6 +50,16 @@ class ClassifierHeadMLP(nn.Module):
         dropout: float = 0.0,
     ):
         super().__init__()
+        self._spec_kwargs = normalize_spec_kwargs(
+            {
+                "hidden_dims": hidden_dims,
+                "num_classes": num_classes,
+                "input_dim": input_dim,
+                "activation": activation,
+                "norm": norm,
+                "dropout": dropout,
+            }
+        )
 
         if len(hidden_dims) == 0:
             raise ValueError(
@@ -76,3 +102,11 @@ class ClassifierHeadMLP(nn.Module):
         logits = self.mlp(x)
 
         return {"logits": logits}
+
+    def to_spec(self):
+        from torchkit.models.head_module.factory import HeadModuleSpec
+
+        return HeadModuleSpec(
+            cls=self.__class__,
+            kwargs=normalize_spec_kwargs(self._spec_kwargs),
+        )

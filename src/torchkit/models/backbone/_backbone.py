@@ -5,6 +5,8 @@ from torch import nn, Tensor
 
 from abc import ABC, abstractmethod
 
+from torchkit.models._spec_utils import resolve_spec_kwargs
+
 
 class Backbone(nn.Module, ABC):
     """Base class for backbone models.
@@ -139,3 +141,11 @@ class Backbone(nn.Module, ABC):
             Assume that `requested_features` is a subset of `available_features` (validation is done in the forward method).\\
             The output *must* be a dictionary of named Tensors(feature maps). The keys of the output dictionary must include all `requested_features`."""
         raise NotImplementedError("Subclasses must implement _forward_impl")
+
+    def to_spec(self):
+        from torchkit.models.backbone.factory import BackboneSpec
+
+        return BackboneSpec(
+            cls=self.__class__,
+            kwargs=resolve_spec_kwargs(self),
+        )

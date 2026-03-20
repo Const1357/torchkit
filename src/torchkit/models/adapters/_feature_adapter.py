@@ -104,6 +104,8 @@ except ImportError:
 from torch import (Tensor, nn)
 import torch
 
+from torchkit.models._spec_utils import normalize_spec_kwargs, resolve_spec_kwargs
+
 
 
 class FeatureAdapter(nn.Module, ABC):
@@ -112,6 +114,14 @@ class FeatureAdapter(nn.Module, ABC):
     def forward(self, features: Tensor, **kwargs) -> Tensor:
         """Transforms backbone features into a format suitable for the head."""
         raise NotImplementedError("Subclasses of FeatureAdapter must implement the forward method to transform features.")
+
+    def to_spec(self):
+        from torchkit.models.adapters.factory import FeatureAdapterSpec
+
+        return FeatureAdapterSpec(
+            cls=self.__class__,
+            kwargs=resolve_spec_kwargs(self),
+        )
 
 
 
@@ -153,6 +163,9 @@ class IdentityAdapter(FeatureAdapter):
     def forward(self, features: Tensor) -> Tensor:
         """Passes features through unchanged."""
         return features
+
+    def to_spec(self):
+        return super().to_spec()
     
 class FlattenAdapter(FeatureAdapter):
 
@@ -160,6 +173,9 @@ class FlattenAdapter(FeatureAdapter):
     def forward(self, features: Tensor) -> Tensor:
         """Flattens features into a 2D tensor (batch_size, -1)."""
         return features.view(features.size(0), -1)
+
+    def to_spec(self):
+        return super().to_spec()
     
 
 class GAPAdapter(FeatureAdapter):
@@ -171,11 +187,15 @@ class GAPAdapter(FeatureAdapter):
     def __init__(self, keepdim: bool = False) -> None:
         super().__init__()
         self.keepdim = keepdim
+        self._spec_kwargs = normalize_spec_kwargs({"keepdim": keepdim})
 
     @override
     def forward(self, features: Tensor) -> Tensor:
         dims = _spatial_dims(features)
         return features.mean(dim=dims, keepdim=self.keepdim)
+
+    def to_spec(self):
+        return super().to_spec()
     
 class GMPAdapter(FeatureAdapter):
     """
@@ -186,11 +206,15 @@ class GMPAdapter(FeatureAdapter):
     def __init__(self, keepdim: bool = False) -> None:
         super().__init__()
         self.keepdim = keepdim
+        self._spec_kwargs = normalize_spec_kwargs({"keepdim": keepdim})
 
     @override
     def forward(self, features: Tensor) -> Tensor:
         dims = _spatial_dims(features)
         return features.amax(dim=dims, keepdim=self.keepdim)
+
+    def to_spec(self):
+        return super().to_spec()
     
 class GAPGMPConcatAdapter(FeatureAdapter):
     """
@@ -205,6 +229,9 @@ class GAPGMPConcatAdapter(FeatureAdapter):
         gap = features.mean(dim=dims)
         gmp = features.amax(dim=dims)
         return torch.cat([gap, gmp], dim=1)
+
+    def to_spec(self):
+        return super().to_spec()
     
 
 class StatsPoolAdapter(FeatureAdapter):
@@ -219,6 +246,7 @@ class StatsPoolAdapter(FeatureAdapter):
     def __init__(self, eps: float = 1e-6) -> None:
         super().__init__()
         self.eps = float(eps)
+        self._spec_kwargs = normalize_spec_kwargs({"eps": eps})
 
     @override
     def forward(self, features: Tensor) -> Tensor:
@@ -229,6 +257,9 @@ class StatsPoolAdapter(FeatureAdapter):
         var = (mean2 - mean * mean).clamp_min(0.0)
         std = (var + self.eps).sqrt()
         return torch.cat([mean, std], dim=1)
+
+    def to_spec(self):
+        return super().to_spec()
     
 
 class GeMAdapter(FeatureAdapter):
@@ -245,6 +276,13 @@ class GeMAdapter(FeatureAdapter):
     def __init__(self, p: float = 3.0, eps: float = 1e-6, learnable_p: bool = True) -> None:
         super().__init__()
         self.eps = float(eps)
+        self._spec_kwargs = normalize_spec_kwargs(
+            {
+                "p": p,
+                "eps": eps,
+                "learnable_p": learnable_p,
+            }
+        )
         if learnable_p:
             self.p = nn.Parameter(torch.tensor(float(p)))
         else:
@@ -256,6 +294,9 @@ class GeMAdapter(FeatureAdapter):
         p = self.p.clamp_min(1.0)  # avoid pathological values
         x = features.clamp_min(self.eps)
         return x.pow(p).mean(dim=dims).pow(1.0 / p)
+
+    def to_spec(self):
+        return super().to_spec()
     
 
 class LogSumExpPoolAdapter(FeatureAdapter):
@@ -271,6 +312,13 @@ class LogSumExpPoolAdapter(FeatureAdapter):
     def __init__(self, temperature: float = 1.0, learnable: bool = False, eps: float = 1e-12) -> None:
         super().__init__()
         self.eps = float(eps)
+        self._spec_kwargs = normalize_spec_kwargs(
+            {
+                "temperature": temperature,
+                "learnable": learnable,
+                "eps": eps,
+            }
+        )
         if learnable:
             self.temperature = nn.Parameter(torch.tensor(float(temperature)))
         else:
@@ -290,6 +338,9 @@ class LogSumExpPoolAdapter(FeatureAdapter):
             S *= int(d)
         lse = lse - torch.log(torch.tensor(float(S), device=features.device, dtype=features.dtype))
         return lse / t
+
+    def to_spec(self):
+        return super().to_spec()
     
 
 
@@ -312,6 +363,12 @@ class AttnPoolAdapter(FeatureAdapter):
         if score_mode not in ("shared", "per_channel"):
             raise ValueError(f"score_mode must be 'shared' or 'per_channel', got {score_mode!r}")
         self.score_mode = score_mode
+        self._spec_kwargs = normalize_spec_kwargs(
+            {
+                "in_channels": in_channels,
+                "score_mode": score_mode,
+            }
+        )
 
         if score_mode == "shared":
             self.score = nn.Conv1d(in_channels, 1, kernel_size=1, bias=True)
@@ -332,6 +389,9 @@ class AttnPoolAdapter(FeatureAdapter):
         y = (xf * a).sum(dim=-1)            # (B, C)
 
         return y
+
+    def to_spec(self):
+        return super().to_spec()
     
 
 class SPPAdapter(FeatureAdapter):
@@ -354,6 +414,12 @@ class SPPAdapter(FeatureAdapter):
             raise ValueError(f"All bins must be positive integers, got {bins}.")
         self.bins = tuple(int(b) for b in bins)
         self.mode = mode
+        self._spec_kwargs = normalize_spec_kwargs(
+            {
+                "bins": self.bins,
+                "mode": mode,
+            }
+        )
 
     @override
     def forward(self, features: Tensor) -> Tensor:
@@ -370,6 +436,9 @@ class SPPAdapter(FeatureAdapter):
             outs.append(pooled.reshape(features.size(0), -1))
 
         return torch.cat(outs, dim=1)
+
+    def to_spec(self):
+        return super().to_spec()
     
 # Patch SPPAdapter to use our ND dispatch without relying on non-existent F.adaptive_*_pool_nd
 SPPAdapter.forward.__annotations__ = {"features": Tensor, "return": Tensor}
@@ -389,6 +458,13 @@ class Conv1x1GAPAdapter(FeatureAdapter):
         self.in_channels = int(in_channels)
         self.out_channels = int(out_channels)
         self.bias = bool(bias)
+        self._spec_kwargs = normalize_spec_kwargs(
+            {
+                "in_channels": in_channels,
+                "out_channels": out_channels,
+                "bias": bias,
+            }
+        )
 
         # conv is created lazily at first forward once we know spatial ndim
         self._conv: nn.Module | None = None
@@ -416,6 +492,9 @@ class Conv1x1GAPAdapter(FeatureAdapter):
 
         x = self._conv(features)  # type: ignore[operator]
         return self._gap(x)
+
+    def to_spec(self):
+        return super().to_spec()
     
 
 class TokenAdapter(FeatureAdapter):
@@ -434,6 +513,12 @@ class TokenAdapter(FeatureAdapter):
             raise ValueError(f"num_tokens must be positive (> 0), got {num_tokens}.")
         self.in_channels = int(in_channels)
         self.num_tokens = int(num_tokens)
+        self._spec_kwargs = normalize_spec_kwargs(
+            {
+                "in_channels": in_channels,
+                "num_tokens": num_tokens,
+            }
+        )
 
         # learned queries: (K, C)
         self.queries = nn.Parameter(torch.empty(self.num_tokens, self.in_channels))
@@ -467,3 +552,6 @@ class TokenAdapter(FeatureAdapter):
 
         # flatten: (B, K*C)
         return tokens.reshape(B, -1)
+
+    def to_spec(self):
+        return super().to_spec()

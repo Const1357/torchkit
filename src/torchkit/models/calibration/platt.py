@@ -4,11 +4,20 @@ import torch
 from torch import Tensor, nn
 
 from torchkit.models.calibration._calibrator import Calibrator
+from torchkit.models._spec_utils import normalize_spec_kwargs
 
 
 class PlattScalingCalibrator(Calibrator):
     def __init__(self, init_a: float = 1.0, init_b: float = 0.0, max_iter: int = 100, lr: float = 0.01, active: bool = False):
         super().__init__(active=active)
+        self._spec_kwargs = normalize_spec_kwargs(
+            {
+                "init_a": init_a,
+                "init_b": init_b,
+                "max_iter": max_iter,
+                "lr": lr,
+            }
+        )
 
         if max_iter <= 0:
             raise ValueError(f"max_iter must be > 0, got {max_iter}.")
@@ -74,3 +83,6 @@ class PlattScalingCalibrator(Calibrator):
             return loss
 
         optimizer.step(closure)
+
+    def to_spec(self):
+        return super().to_spec()

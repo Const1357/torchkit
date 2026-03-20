@@ -32,3 +32,6 @@ class ClassificationProbabilityMapper(ProbabilityMapper):
             f"{self.__class__.__name__} expects binary or multiclass logits of shape (N,), (N,1), or (N,C) with C>=2. "
             f"Got shape {tuple(logits.shape)}."
         )
+
+    def to_spec(self):
+        return super().to_spec()

@@ -4,6 +4,7 @@ from torch import Tensor
 import torch
 
 from torchkit.models.decision._decision_module import DecisionModule
+from torchkit.models._spec_utils import normalize_spec_kwargs
 
 
 class BinaryClassificationThreshold(DecisionModule):
@@ -25,6 +26,7 @@ class BinaryClassificationThreshold(DecisionModule):
 
     def __init__(self, threshold: float = 0.5):
         super().__init__()
+        self._spec_kwargs = normalize_spec_kwargs({"threshold": threshold})
 
         if not 0.0 <= threshold <= 1.0:
             raise ValueError(f"threshold must be in [0, 1], got {threshold}.")
@@ -59,6 +61,14 @@ class BinaryClassificationThreshold(DecisionModule):
             )
 
         return (p_pos >= self.threshold).to(dtype=torch.long)
+
+    def to_spec(self):
+        from torchkit.models.decision.factory import DecisionModuleSpec
+
+        return DecisionModuleSpec(
+            cls=self.__class__,
+            kwargs={"threshold": self.threshold},
+        )
     
 
 class ArgmaxDecision(DecisionModule):
@@ -81,6 +91,9 @@ class ArgmaxDecision(DecisionModule):
             )
 
         return torch.argmax(probs, dim=1)
+
+    def to_spec(self):
+        return super().to_spec()
     
 class SampleTopKTemperature(DecisionModule):
     """
@@ -95,6 +108,12 @@ class SampleTopKTemperature(DecisionModule):
 
     def __init__(self, k: int = 5, temperature: float = 1.0):
         super().__init__()
+        self._spec_kwargs = normalize_spec_kwargs(
+            {
+                "k": k,
+                "temperature": temperature,
+            }
+        )
 
         if k <= 0:
             raise ValueError(f"k must be > 0, got {k}.")
@@ -126,3 +145,14 @@ class SampleTopKTemperature(DecisionModule):
 
         # Map back to original class indices
         return topk_indices.gather(1, sampled_indices.unsqueeze(1)).squeeze(1)
+
+    def to_spec(self):
+        from torchkit.models.decision.factory import DecisionModuleSpec
+
+        return DecisionModuleSpec(
+            cls=self.__class__,
+            kwargs={
+                "k": self.k,
+                "temperature": self.temperature,
+            },
+        )

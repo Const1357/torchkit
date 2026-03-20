@@ -84,3 +84,34 @@ class PredictionHead(nn.Module):
             out["predictions"] = predictions
 
         return out
+
+    def to_spec(self):
+        from torchkit.models.calibration.factory import CalibratorSpec
+        from torchkit.models.decision.factory import DecisionModuleSpec
+        from torchkit.models.prediction.factory import PredictionHeadSpec
+        from torchkit.models.probability_mapping.factory import ProbabilityMapperSpec
+
+        calibrator = None if self.calibrator is None else self.calibrator.to_spec()
+        if calibrator is not None and not isinstance(calibrator, CalibratorSpec):
+            raise TypeError(f"{self.calibrator.__class__.__name__}.to_spec() must return CalibratorSpec.")
+
+        probability_mapper = (
+            None if self.probability_mapper is None else self.probability_mapper.to_spec()
+        )
+        if probability_mapper is not None and not isinstance(probability_mapper, ProbabilityMapperSpec):
+            raise TypeError(
+                f"{self.probability_mapper.__class__.__name__}.to_spec() must return ProbabilityMapperSpec."
+            )
+
+        decision_module = None if self.decision_module is None else self.decision_module.to_spec()
+        if decision_module is not None and not isinstance(decision_module, DecisionModuleSpec):
+            raise TypeError(
+                f"{self.decision_module.__class__.__name__}.to_spec() must return DecisionModuleSpec."
+            )
+
+        return PredictionHeadSpec(
+            calibrator=calibrator,
+            probability_mapper=probability_mapper,
+            decision_module=decision_module,
+            active=self.is_active,
+        )

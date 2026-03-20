@@ -4,6 +4,8 @@ from abc import ABC, abstractmethod
 
 from torch import nn, Tensor
 
+from torchkit.models._spec_utils import resolve_spec_kwargs
+
 class ProbabilityMapper(nn.Module, ABC):
     """Responsible to transform (optionally calibrated) logits -> probabilities."""
     def __init__(self, *args, **kwargs):
@@ -25,3 +27,11 @@ class ProbabilityMapper(nn.Module, ABC):
     @abstractmethod
     def forward_impl(self, logits: Tensor) -> Tensor:
         raise NotImplementedError(f"{self.__class__.__name__} must implement `forward_impl` method for transforming logits to probabilities.")
+
+    def to_spec(self):
+        from torchkit.models.probability_mapping.factory import ProbabilityMapperSpec
+
+        return ProbabilityMapperSpec(
+            cls=self.__class__,
+            kwargs=resolve_spec_kwargs(self),
+        )
