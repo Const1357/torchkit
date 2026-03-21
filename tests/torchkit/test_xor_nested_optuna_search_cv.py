@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from torchkit.data.split import StratifiedKFold
+from torchkit.train.cv._optuna_search_mixin import ParameterGrid
 from torchkit.train.cv.nested_optuna_search_cv import NestedOptunaSearchCV
 
 from tests.torchkit._xor_test_utils import (
@@ -19,9 +20,9 @@ def test_xor_nested_optuna_search_cv_learns_with_live_model_and_dataset_evaluato
     cv = NestedOptunaSearchCV(
         model_spec=make_xor_model(hidden_dim=16),
         trainer_spec=make_xor_trainer_spec(lr=1e-3, max_epochs=150),
-        parameter_grid={
+        parameter_grid=ParameterGrid.from_simple({
             "trainer/config/optimizer_kwargs/lr": ([1e-3, 1e-2, 5e-2], "categorical"),
-        },
+        }),
         outer_splitter_cls=StratifiedKFold,
         inner_splitter_cls=StratifiedKFold,
         dataloader_factory=lambda ds, shuffle: make_xor_loader(ds, shuffle=shuffle, batch_size=16),

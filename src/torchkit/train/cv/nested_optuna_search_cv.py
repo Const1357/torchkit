@@ -15,7 +15,7 @@ from torchkit.train.cv._optuna_results import (
     NestedOptunaSearchCVResult,
     OuterFoldResult,
 )
-from torchkit.train.cv._optuna_search_mixin import SuggestionType
+from torchkit.train.cv._optuna_search_mixin import ParameterGrid
 from torchkit.train.cv.optuna_search_cv import OptunaSearchCV
 
 
@@ -33,7 +33,7 @@ class NestedOptunaSearchCV(BaseSearchCV):
         *,
         model_spec,
         trainer_spec,
-        parameter_grid: dict[str, tuple[list, SuggestionType]],
+        parameter_grid: ParameterGrid,
         outer_splitter_cls,
         inner_splitter_cls,
         dataloader_factory=None,

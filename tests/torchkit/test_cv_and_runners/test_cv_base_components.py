@@ -28,7 +28,12 @@ from torchkit.train.cv._optuna_results import (
     OuterFoldResult,
     NestedOptunaSearchCVResult,
 )
-from torchkit.train.cv._optuna_search_mixin import OptunaSearchMixin
+from torchkit.train.cv._optuna_search_mixin import (
+    DerivedParam,
+    OptunaSearchMixin,
+    ParameterGrid,
+    SuggestionSpec,
+)
 from torchkit.train.factory import TrainerFactory
 
 from tests.torchkit.test_cv_and_runners.conftest import (
@@ -200,10 +205,10 @@ def test_base_search_cv_routes_parameters_into_real_specs(tmp_path):
     cv = MinimalBaseSearchCV(
         model_spec=model_spec,
         trainer_spec=trainer_spec,
-        parameter_grid={
+        parameter_grid=ParameterGrid.from_simple({
             "model/backbone/kwargs/scale_factor": ([1.0], "categorical"),
             "trainer/config/max_epochs": ([4], "categorical"),
-        },
+        }),
         splitter_cls=StratifiedKFold,
         n_splits=2,
         final_model_dir=str(tmp_path),
@@ -221,6 +226,51 @@ def test_base_search_cv_routes_parameters_into_real_specs(tmp_path):
     assert trainer.config.max_epochs == 7
 
 
+def test_base_search_cv_validates_projected_parameter_targets(tmp_path):
+    model_spec = make_model_spec()
+    trainer_spec = make_trainer_spec(
+        evaluator=AccuracySelectorEvaluator(
+            score_key="clf/logits",
+            target_key="batch/y",
+            name="classification",
+        ),
+        max_epochs=2,
+    )
+
+    cv = MinimalBaseSearchCV(
+        model_spec=model_spec,
+        trainer_spec=trainer_spec,
+        parameter_grid=ParameterGrid(
+            suggestions={
+                "model/backbone/kwargs/scale_factor": SuggestionSpec(
+                    values=[1.0],
+                    suggestion_type="categorical",
+                ),
+            },
+            derived_params=[
+                DerivedParam(
+                    target_path="trainer/config/max_epochs",
+                    args=["model/backbone/kwargs/scale_factor"],
+                    transform=lambda x: int(x) + 2,
+                ),
+            ],
+        ),
+        splitter_cls=StratifiedKFold,
+        n_splits=2,
+        final_model_dir=str(tmp_path),
+    )
+
+    built_model_spec, built_trainer_spec, _trainer = cv._build_trainer_for_trial(
+        params={
+            "model/backbone/kwargs/scale_factor": -1.0,
+            "trainer/config/max_epochs": 9,
+        }
+    )
+
+    assert built_model_spec.backbone.kwargs["scale_factor"] == -1.0
+    assert built_trainer_spec.config.max_epochs == 9
+
+
 def test_base_search_cv_accepts_live_model_and_builds_trial_trainer(tmp_path):
     live_model = TorchkitModelFactory.build(make_model_spec(scale_factor=1.0))
     trainer_spec = make_trainer_spec(
@@ -235,9 +285,9 @@ def test_base_search_cv_accepts_live_model_and_builds_trial_trainer(tmp_path):
     cv = MinimalBaseSearchCV(
         model_spec=live_model,
         trainer_spec=trainer_spec,
-        parameter_grid={
+        parameter_grid=ParameterGrid.from_simple({
             "trainer/config/max_epochs": ([4], "categorical"),
-        },
+        }),
         splitter_cls=StratifiedKFold,
         n_splits=2,
         final_model_dir=str(tmp_path / "search_live_model"),
@@ -259,14 +309,16 @@ def test_optuna_search_mixin_suggest_parameters():
 
     params = MinimalOptunaSearchCV.suggest_parameters(
         trial,
-        {
-            "a": ([1, 2], "categorical"),
-            "b": ([0.1, 0.5], "float"),
-            "c": ([1, 3], "int"),
-            "d": ([1e-4, 1e-2], "loguniform"),
-            "e": ([0.0, 1.0], "uniform"),
-            "f": ([0.0, 1.0, 0.25], "discrete_uniform"),
-        },
+        ParameterGrid(
+            suggestions={
+                "a": SuggestionSpec(values=[1, 2], suggestion_type="categorical"),
+                "b": SuggestionSpec(values=[0.1, 0.5], suggestion_type="float"),
+                "c": SuggestionSpec(values=[1, 3], suggestion_type="int"),
+                "d": SuggestionSpec(values=[1e-4, 1e-2], suggestion_type="loguniform"),
+                "e": SuggestionSpec(values=[0.0, 1.0], suggestion_type="uniform"),
+                "f": SuggestionSpec(values=[0.0, 1.0, 0.25], suggestion_type="discrete_uniform"),
+            }
+        ),
     )
 
     assert params["a"] in [1, 2]
@@ -275,6 +327,33 @@ def test_optuna_search_mixin_suggest_parameters():
     assert 1e-4 <= params["d"] <= 1e-2
     assert 0.0 <= params["e"] <= 1.0
     assert params["f"] in [0.0, 0.25, 0.5, 0.75, 1.0]
+
+
+def test_optuna_search_mixin_suggest_parameters_supports_derived_params():
+    study = optuna.create_study(direction="maximize")
+    trial = study.ask()
+
+    params = MinimalOptunaSearchCV.suggest_parameters(
+        trial,
+        ParameterGrid(
+            suggestions={
+                "model/backbone/kwargs/scale_factor": SuggestionSpec(
+                    values=[1.0, 2.0],
+                    suggestion_type="categorical",
+                ),
+            },
+            derived_params=[
+                DerivedParam(
+                    target_path="trainer/config/max_epochs",
+                    args=["model/backbone/kwargs/scale_factor"],
+                    transform=lambda x: int(10 * x),
+                ),
+            ],
+        ),
+    )
+
+    assert params["model/backbone/kwargs/scale_factor"] in [1.0, 2.0]
+    assert params["trainer/config/max_epochs"] in [10, 20]
 
 
 def test_results_containers_support_offline_processing_and_reconstruction(
@@ -298,7 +377,7 @@ def test_results_containers_support_offline_processing_and_reconstruction(
         model_spec=model_spec,
         trainer_spec=trainer_spec,
         splitter_cls=StratifiedKFold,
-        parameter_grid={"model/backbone/kwargs/scale_factor": ([1.0], "categorical")},
+        parameter_grid=ParameterGrid.from_simple({"model/backbone/kwargs/scale_factor": ([1.0], "categorical")}),
         tmp_path=tmp_path,
         n_trials=1,
         max_trial_attempts=3,
@@ -386,7 +465,7 @@ def test_nested_results_support_offline_processing_and_reconstruction(
         trainer_spec=trainer_spec,
         outer_splitter_cls=StratifiedKFold,
         inner_splitter_cls=StratifiedKFold,
-        parameter_grid={"model/backbone/kwargs/scale_factor": ([1.0], "categorical")},
+        parameter_grid=ParameterGrid.from_simple({"model/backbone/kwargs/scale_factor": ([1.0], "categorical")}),
         tmp_path=tmp_path,
         n_trials=1,
         max_trial_attempts=3,

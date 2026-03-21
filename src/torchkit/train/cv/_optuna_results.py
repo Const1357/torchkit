@@ -12,7 +12,7 @@ import torch
 
 from torchkit.models.Model.factory import TorchkitModelFactory, TorchkitModelSpec
 from torchkit.train.cv._base_cv import MetricDirection
-from torchkit.train.cv._optuna_search_mixin import SuggestionType, TrialStatus
+from torchkit.train.cv._optuna_search_mixin import ParameterGrid, TrialStatus
 from torchkit.train.factory import TrainerFactory, TrainerSpec
 from torchkit.train.trainer import Trainer
 
@@ -316,7 +316,7 @@ class OptunaSearchCVResult:
     # CV-level metadata
     base_model_spec: Optional[TorchkitModelSpec] = None
     base_trainer_spec: Optional[TrainerSpec] = None
-    parameter_grid: dict[str, tuple[list, SuggestionType]] = field(default_factory=dict)
+    parameter_grid: Optional[ParameterGrid] = None
 
     splitter_name: str = ""
     n_splits: int = 0
@@ -613,7 +613,7 @@ class NestedOptunaSearchCVResult:
     # CV-level metadata for offline reporting / auditability
     base_model_spec: Optional[TorchkitModelSpec] = None
     base_trainer_spec: Optional[TrainerSpec] = None
-    parameter_grid: dict[str, tuple[list, SuggestionType]] = field(default_factory=dict)
+    parameter_grid: Optional[ParameterGrid] = None
 
     outer_splitter_name: str = ""
     inner_splitter_name: str = ""

@@ -12,6 +12,7 @@ from torchkit.data.split import StratifiedKFold, GroupKFold, StratifiedGroupKFol
 from torchkit.evaluate.select import AccuracySelectorEvaluator
 from torchkit.models.Model.factory import TorchkitModelFactory
 
+from torchkit.train.cv._optuna_search_mixin import ParameterGrid
 from torchkit.train.cv.optuna_search_cv import OptunaSearchCV
 from torchkit.train.cv._optuna_results import OptunaSearchCVResult
 
@@ -37,7 +38,7 @@ def test_optuna_search_cv_rejects_unrebuildable_final_model_configuration():
         OptunaSearchCV(
             model_spec=model_spec,
             trainer_spec=trainer_spec,
-            parameter_grid={"model/backbone/kwargs/scale_factor": ([1.0], "categorical")},
+            parameter_grid=ParameterGrid.from_simple({"model/backbone/kwargs/scale_factor": ([1.0], "categorical")}),
             splitter_cls=StratifiedKFold,
             n_trials=1,
             n_splits=2,
@@ -61,7 +62,7 @@ def test_optuna_search_cv_rejects_invalid_parameter_path(tmp_path):
             model_spec=model_spec,
             trainer_spec=trainer_spec,
             splitter_cls=StratifiedKFold,
-            parameter_grid={"badpath": ([1.0], "categorical")},
+            parameter_grid=ParameterGrid.from_simple({"badpath": ([1.0], "categorical")}),
             tmp_path=tmp_path,
         )
 
@@ -87,10 +88,10 @@ def test_optuna_search_cv_logs_everything_needed_for_reporting_stratified(
         model_spec=model_spec,
         trainer_spec=trainer_spec,
         splitter_cls=StratifiedKFold,
-        parameter_grid={
+        parameter_grid=ParameterGrid.from_simple({
             "model/backbone/kwargs/scale_factor": ([1.0], "categorical"),
             "trainer/config/max_epochs": ([2], "categorical"),
-        },
+        }),
         tmp_path=tmp_path,
         n_trials=1,
         max_trial_attempts=3,
@@ -223,7 +224,7 @@ def test_optuna_search_cv_group_splitters_have_no_group_leakage(
         model_spec=model_spec,
         trainer_spec=trainer_spec,
         splitter_cls=splitter_cls,
-        parameter_grid={"model/backbone/kwargs/scale_factor": ([1.0], "categorical")},
+        parameter_grid=ParameterGrid.from_simple({"model/backbone/kwargs/scale_factor": ([1.0], "categorical")}),
         tmp_path=tmp_path,
         n_trials=1,
         max_trial_attempts=3,
@@ -263,10 +264,10 @@ def test_optuna_search_cv_routes_parameters_into_real_model_and_trainer_specs(
         model_spec=model_spec,
         trainer_spec=trainer_spec,
         splitter_cls=StratifiedKFold,
-        parameter_grid={
+        parameter_grid=ParameterGrid.from_simple({
             "model/backbone/kwargs/scale_factor": ([1.0], "categorical"),
             "trainer/config/max_epochs": ([4], "categorical"),
-        },
+        }),
         tmp_path=tmp_path,
         n_trials=1,
         max_trial_attempts=3,
@@ -304,7 +305,7 @@ def test_optuna_search_cv_handles_minimize_selection_metric_correctly(
         model_spec=model_spec,
         trainer_spec=trainer_spec,
         splitter_cls=StratifiedKFold,
-        parameter_grid={"model/backbone/kwargs/scale_factor": ([1.0], "categorical")},
+        parameter_grid=ParameterGrid.from_simple({"model/backbone/kwargs/scale_factor": ([1.0], "categorical")}),
         tmp_path=tmp_path,
         n_trials=1,
         max_trial_attempts=3,
@@ -341,7 +342,7 @@ def test_optuna_search_cv_rebuilds_final_model_and_trainer_and_preserves_calibra
         model_spec=model_spec,
         trainer_spec=trainer_spec,
         splitter_cls=StratifiedKFold,
-        parameter_grid={"model/backbone/kwargs/scale_factor": ([1.0], "categorical")},
+        parameter_grid=ParameterGrid.from_simple({"model/backbone/kwargs/scale_factor": ([1.0], "categorical")}),
         tmp_path=tmp_path,
         n_trials=1,
         max_trial_attempts=3,
@@ -399,7 +400,7 @@ def test_optuna_search_cv_result_is_pickleable_and_reconstruction_survives_round
         model_spec=model_spec,
         trainer_spec=trainer_spec,
         splitter_cls=StratifiedKFold,
-        parameter_grid={"model/backbone/kwargs/scale_factor": ([1.0], "categorical")},
+        parameter_grid=ParameterGrid.from_simple({"model/backbone/kwargs/scale_factor": ([1.0], "categorical")}),
         tmp_path=tmp_path,
         n_trials=1,
         max_trial_attempts=3,
@@ -453,7 +454,7 @@ def test_optuna_search_cv_final_model_reconstruction_is_prediction_identical(
         model_spec=model_spec,
         trainer_spec=trainer_spec,
         splitter_cls=StratifiedKFold,
-        parameter_grid={"model/backbone/kwargs/scale_factor": ([1.0], "categorical")},
+        parameter_grid=ParameterGrid.from_simple({"model/backbone/kwargs/scale_factor": ([1.0], "categorical")}),
         tmp_path=tmp_path,
         n_trials=1,
         max_trial_attempts=3,
@@ -566,7 +567,7 @@ def test_optuna_search_cv_logs_failed_and_pruned_trials_with_params_and_tracebac
     cv = FaultInjectingOptunaSearchCV(
         model_spec=model_spec,
         trainer_spec=trainer_spec,
-        parameter_grid={"model/backbone/kwargs/scale_factor": ([1.0], "categorical")},
+        parameter_grid=ParameterGrid.from_simple({"model/backbone/kwargs/scale_factor": ([1.0], "categorical")}),
         splitter_cls=StratifiedKFold,
         dataloader_factory=lambda ds, shuffle: torch.utils.data.DataLoader(ds, batch_size=2, shuffle=shuffle),
         n_trials=1,
@@ -634,10 +635,10 @@ def test_optuna_search_cv_is_deterministic_for_same_seed(
         model_spec=model_spec_1,
         trainer_spec=trainer_spec_1,
         splitter_cls=StratifiedGroupKFold,
-        parameter_grid={
+        parameter_grid=ParameterGrid.from_simple({
             "model/backbone/kwargs/scale_factor": ([1.0], "categorical"),
             "trainer/config/max_epochs": ([2], "categorical"),
-        },
+        }),
         tmp_path=tmp_path / "run1",
         n_trials=1,
         max_trial_attempts=3,
@@ -649,10 +650,10 @@ def test_optuna_search_cv_is_deterministic_for_same_seed(
         model_spec=model_spec_2,
         trainer_spec=trainer_spec_2,
         splitter_cls=StratifiedGroupKFold,
-        parameter_grid={
+        parameter_grid=ParameterGrid.from_simple({
             "model/backbone/kwargs/scale_factor": ([1.0], "categorical"),
             "trainer/config/max_epochs": ([2], "categorical"),
-        },
+        }),
         tmp_path=tmp_path / "run2",
         n_trials=1,
         max_trial_attempts=3,

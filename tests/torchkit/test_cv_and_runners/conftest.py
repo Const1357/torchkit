@@ -22,6 +22,7 @@ from torchkit.models.calibration.factory import CalibratorSpec
 
 from torchkit.train.factory import TrainerSpec
 from torchkit.train.trainer import Trainer, TrainerConfig
+from torchkit.train.cv._optuna_search_mixin import ParameterGrid
 
 from torchkit.objectives.relational import CELoss
 from torchkit.evaluate.select import AccuracySelectorEvaluator, SelectorEvaluator
@@ -217,7 +218,7 @@ def make_optuna_search_cv(
     model_spec: TorchkitModelSpec,
     trainer_spec: TrainerSpec,
     splitter_cls,
-    parameter_grid: dict[str, tuple[list, str]],
+    parameter_grid: ParameterGrid,
     tmp_path,
     n_trials: int = 1,
     max_trial_attempts: int = 5,
@@ -249,7 +250,7 @@ def make_nested_cv(
     trainer_spec: TrainerSpec,
     outer_splitter_cls,
     inner_splitter_cls,
-    parameter_grid: dict[str, tuple[list, str]],
+    parameter_grid: ParameterGrid,
     tmp_path,
     n_trials: int = 1,
     max_trial_attempts: int = 5,

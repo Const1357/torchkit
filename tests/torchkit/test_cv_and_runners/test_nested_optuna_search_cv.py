@@ -15,6 +15,7 @@ from torchkit.train.cv._optuna_results import (
     OptunaSearchCVResult,
     OuterFoldResult,
 )
+from torchkit.train.cv._optuna_search_mixin import ParameterGrid
 
 from tests.torchkit.test_cv_and_runners.conftest import (
     ErrorRateEvaluator,
@@ -40,7 +41,7 @@ def test_nested_cv_rejects_unrebuildable_final_model_configuration():
         NestedOptunaSearchCV(
             model_spec=model_spec,
             trainer_spec=trainer_spec,
-            parameter_grid={"model/backbone/kwargs/scale_factor": ([1.0], "categorical")},
+            parameter_grid=ParameterGrid.from_simple({"model/backbone/kwargs/scale_factor": ([1.0], "categorical")}),
             outer_splitter_cls=StratifiedKFold,
             inner_splitter_cls=StratifiedKFold,
             n_trials=1,
@@ -73,10 +74,10 @@ def test_nested_cv_logs_everything_needed_for_reporting_stratified(
         trainer_spec=trainer_spec,
         outer_splitter_cls=StratifiedKFold,
         inner_splitter_cls=StratifiedKFold,
-        parameter_grid={
+        parameter_grid=ParameterGrid.from_simple({
             "model/backbone/kwargs/scale_factor": ([1.0], "categorical"),
             "trainer/config/max_epochs": ([2], "categorical"),
-        },
+        }),
         tmp_path=tmp_path,
         n_trials=1,
         max_trial_attempts=3,
@@ -173,7 +174,7 @@ def test_nested_cv_group_splitters_have_no_group_leakage(
         trainer_spec=trainer_spec,
         outer_splitter_cls=outer_splitter_cls,
         inner_splitter_cls=inner_splitter_cls,
-        parameter_grid={"model/backbone/kwargs/scale_factor": ([1.0], "categorical")},
+        parameter_grid=ParameterGrid.from_simple({"model/backbone/kwargs/scale_factor": ([1.0], "categorical")}),
         tmp_path=tmp_path,
         n_trials=1,
         max_trial_attempts=3,
@@ -217,7 +218,7 @@ def test_nested_cv_handles_minimize_selection_metric_correctly(
         trainer_spec=trainer_spec,
         outer_splitter_cls=StratifiedKFold,
         inner_splitter_cls=StratifiedKFold,
-        parameter_grid={"model/backbone/kwargs/scale_factor": ([1.0], "categorical")},
+        parameter_grid=ParameterGrid.from_simple({"model/backbone/kwargs/scale_factor": ([1.0], "categorical")}),
         tmp_path=tmp_path,
         n_trials=1,
         max_trial_attempts=3,
@@ -261,7 +262,7 @@ def test_nested_cv_rebuilds_final_model_and_trainer_and_preserves_calibrator_fit
         trainer_spec=trainer_spec,
         outer_splitter_cls=StratifiedKFold,
         inner_splitter_cls=StratifiedKFold,
-        parameter_grid={"model/backbone/kwargs/scale_factor": ([1.0], "categorical")},
+        parameter_grid=ParameterGrid.from_simple({"model/backbone/kwargs/scale_factor": ([1.0], "categorical")}),
         tmp_path=tmp_path,
         n_trials=1,
         max_trial_attempts=3,
@@ -323,7 +324,7 @@ def test_nested_cv_result_is_pickleable_and_reconstruction_survives_roundtrip(
         trainer_spec=trainer_spec,
         outer_splitter_cls=StratifiedKFold,
         inner_splitter_cls=StratifiedKFold,
-        parameter_grid={"model/backbone/kwargs/scale_factor": ([1.0], "categorical")},
+        parameter_grid=ParameterGrid.from_simple({"model/backbone/kwargs/scale_factor": ([1.0], "categorical")}),
         tmp_path=tmp_path,
         n_trials=1,
         max_trial_attempts=3,
@@ -379,7 +380,7 @@ def test_nested_cv_final_model_reconstruction_is_prediction_identical(
         trainer_spec=trainer_spec,
         outer_splitter_cls=StratifiedKFold,
         inner_splitter_cls=StratifiedKFold,
-        parameter_grid={"model/backbone/kwargs/scale_factor": ([1.0], "categorical")},
+        parameter_grid=ParameterGrid.from_simple({"model/backbone/kwargs/scale_factor": ([1.0], "categorical")}),
         tmp_path=tmp_path,
         n_trials=1,
         max_trial_attempts=3,
@@ -474,10 +475,10 @@ def test_nested_cv_is_deterministic_for_same_seed(
         trainer_spec=trainer_spec_1,
         outer_splitter_cls=StratifiedGroupKFold,
         inner_splitter_cls=StratifiedGroupKFold,
-        parameter_grid={
+        parameter_grid=ParameterGrid.from_simple({
             "model/backbone/kwargs/scale_factor": ([1.0], "categorical"),
             "trainer/config/max_epochs": ([2], "categorical"),
-        },
+        }),
         tmp_path=tmp_path / "run1",
         n_trials=1,
         max_trial_attempts=3,
@@ -491,10 +492,10 @@ def test_nested_cv_is_deterministic_for_same_seed(
         trainer_spec=trainer_spec_2,
         outer_splitter_cls=StratifiedGroupKFold,
         inner_splitter_cls=StratifiedGroupKFold,
-        parameter_grid={
+        parameter_grid=ParameterGrid.from_simple({
             "model/backbone/kwargs/scale_factor": ([1.0], "categorical"),
             "trainer/config/max_epochs": ([2], "categorical"),
-        },
+        }),
         tmp_path=tmp_path / "run2",
         n_trials=1,
         max_trial_attempts=3,

@@ -10,6 +10,10 @@ from torchkit.data.split import KFoldSplitter
 from torchkit.models.Model._model import TorchkitModel
 from torchkit.models.Model.factory import TorchkitModelSpec
 from torchkit.train.cv._base_cv import BaseCV
+from torchkit.train.cv._optuna_search_mixin import (
+    ParameterGridLike,
+    coerce_parameter_grid,
+)
 from torchkit.train.factory import TrainerFactory, TrainerSpec
 from torchkit.train.trainer import Trainer
 
@@ -53,7 +57,7 @@ class BaseSearchCV(BaseCV):
         *,
         model_spec: TorchkitModelSpec | TorchkitModel,
         trainer_spec: TrainerSpec,
-        parameter_grid: dict[str, Any],
+        parameter_grid: ParameterGridLike,
         splitter_cls: type[KFoldSplitter],
         dataloader_factory: Optional[Callable[[Dataset, bool], DataLoader]] = None,
         n_trials: int = 10,
@@ -78,7 +82,7 @@ class BaseSearchCV(BaseCV):
             keep_final_model_state_dict_cpu=keep_final_model_state_dict_cpu,
         )
 
-        self.parameter_grid = copy.deepcopy(parameter_grid)
+        self.parameter_grid = copy.deepcopy(coerce_parameter_grid(parameter_grid))
         self.n_trials = int(n_trials)
 
         if self.n_trials <= 0:
@@ -99,41 +103,62 @@ class BaseSearchCV(BaseCV):
 
     def _validate_parameter_grid(self) -> None:
         """
-        Base validation assumes entries are either:
-        - any direct replacement value, or
-        - a tuple/list whose first element is a representative replacement value
-          (e.g. Optuna-style: (values, suggestion_type))
+        Base validation assumes entries are Optuna-style parameter specs that can be
+        flattened into one or more concrete ``model/...`` or ``trainer/...`` assignments.
         """
         model_spec = copy.deepcopy(self.model_spec)
         trainer_spec = copy.deepcopy(self.trainer_spec)
 
-        for path, spec in self.parameter_grid.items():
+        for path, spec in self.parameter_grid.suggestions.items():
             if not isinstance(path, str) or not path:
                 raise ValueError(f"Invalid parameter path: {path!r}")
 
-            if path.startswith("model/"):
-                target = model_spec
-                rel_path = path.removeprefix("model/")
-            elif path.startswith("trainer/"):
-                target = trainer_spec
-                rel_path = path.removeprefix("trainer/")
-            else:
-                raise ValueError(
-                    f"Parameter path {path!r} must start with 'model/' or 'trainer/'."
-                )
+            self._validate_target_path(
+                target_path=path,
+                value=self._dummy_value_for_validation(spec.values),
+                model_spec=model_spec,
+                trainer_spec=trainer_spec,
+            )
 
-            _set_by_path(target, rel_path, self._dummy_value_for_validation(spec))
+        sampled_values = {
+            path: self._dummy_value_for_validation(spec.values)
+            for path, spec in self.parameter_grid.suggestions.items()
+        }
+        for derived in self.parameter_grid.derived_params:
+            arg_values = [sampled_values[arg] for arg in derived.args]
+            self._validate_target_path(
+                target_path=derived.target_path,
+                value=derived.transform(*arg_values),
+                model_spec=model_spec,
+                trainer_spec=trainer_spec,
+            )
 
     @staticmethod
-    def _dummy_value_for_validation(spec: Any) -> Any:
-        if isinstance(spec, tuple) and len(spec) >= 1:
-            first = spec[0]
-            if isinstance(first, (list, tuple)) and len(first) >= 1:
-                return first[0]
-            return first
-        if isinstance(spec, list) and len(spec) >= 1:
-            return spec[0]
-        return spec
+    def _dummy_value_for_validation(values: list[Any]) -> Any:
+        if len(values) == 0:
+            raise ValueError("Parameter grid values list must be non-empty.")
+        return values[0]
+
+    @staticmethod
+    def _validate_target_path(
+        *,
+        target_path: str,
+        value: Any,
+        model_spec: TorchkitModelSpec,
+        trainer_spec: TrainerSpec,
+    ) -> None:
+        if target_path.startswith("model/"):
+            target = model_spec
+            rel_path = target_path.removeprefix("model/")
+        elif target_path.startswith("trainer/"):
+            target = trainer_spec
+            rel_path = target_path.removeprefix("trainer/")
+        else:
+            raise ValueError(
+                f"Parameter path {target_path!r} must start with 'model/' or 'trainer/'."
+            )
+
+        _set_by_path(target, rel_path, value)
 
     def _apply_suggested_params(
         self,
