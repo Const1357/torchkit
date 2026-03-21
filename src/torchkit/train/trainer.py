@@ -484,7 +484,7 @@ class Trainer:
         batch_selector_weighted_value_sum = 0.0
         batch_selector_component_sums: dict[str, dict[str, float]] = {}
 
-        active_calib_tasks = tuple(getattr(self.model, "active_calibrator_names", set()) or ())
+        active_posthoc_tasks = tuple(getattr(self.model, "active_posthoc_output_names", set()) or ())
         oof_logits_cache: dict[str, list[torch.Tensor]] = defaultdict(list)
         oof_targets_cache: dict[str, list[torch.Tensor]] = defaultdict(list)
 
@@ -553,8 +553,8 @@ class Trainer:
                             )
                         _append_cached(dataset_cache, key, val)
 
-                if active_calib_tasks:
-                    for task in active_calib_tasks:
+                if active_posthoc_tasks:
+                    for task in active_posthoc_tasks:
                         if task not in model_out:
                             continue
                         node = model_out[task]
@@ -563,7 +563,7 @@ class Trainer:
                         logits = node.get("logits", None)
                         if not torch.is_tensor(logits):
                             raise KeyError(
-                                f"Expected model_out[{task!r}]['logits'] Tensor for calibrator OOF logging, got {type(logits).__name__}."
+                                f"Expected model_out[{task!r}]['logits'] Tensor for post-hoc OOF logging, got {type(logits).__name__}."
                             )
 
                         targets = _find_task_targets(task, batch)
@@ -656,13 +656,13 @@ class Trainer:
             setattr(self.state, "_best_metric_kind", best_metric_kind)
             self.state.epochs_since_improvement = 0
 
-            if active_calib_tasks:
+            if active_posthoc_tasks:
                 if not hasattr(self.state, "oof_logits"):
                     self.state.oof_logits = {}
                 if not hasattr(self.state, "oof_targets"):
                     self.state.oof_targets = {}
 
-                for task in active_calib_tasks:
+                for task in active_posthoc_tasks:
                     ls = oof_logits_cache.get(task, [])
                     ts = oof_targets_cache.get(task, [])
                     if len(ls) == 0 or len(ts) == 0:

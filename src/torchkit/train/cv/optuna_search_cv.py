@@ -331,7 +331,7 @@ class OptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
             early_stopping_patience=None,
         )
 
-        self._fit_calibrators_from_oof(
+        self._fit_posthoc_modules_from_oof(
             final_trainer.model,
             oof_logits=best_trial_result.aggregate_oof_logits,
             oof_targets=best_trial_result.aggregate_oof_targets,

@@ -6,6 +6,7 @@ import copy
 import os
 
 import torch
+from torch import nn
 from torch.utils.data import DataLoader, Dataset, Subset
 
 from torchkit.data._dataset import TorchkitDataset
@@ -66,6 +67,14 @@ def _concat_tensor_dicts(dicts: list[dict[str, torch.Tensor]]) -> dict[str, torc
         else:
             merged[k] = torch.cat(vs, dim=0)
     return merged
+
+
+def _module_device(module: nn.Module) -> torch.device:
+    for param in module.parameters():
+        return param.device
+    for buffer in module.buffers():
+        return buffer.device
+    return torch.device("cpu")
 
 
 def _resolve_original_indices_for_subset(subset: Subset) -> list[int]:
@@ -218,7 +227,7 @@ class BaseCV:
             trainer.state = state_backup
         return metrics
 
-    def _fit_calibrators_from_oof(
+    def _fit_posthoc_modules_from_oof(
         self,
         model: Any,
         *,
@@ -237,19 +246,61 @@ class BaseCV:
                 continue
 
             calibrator = getattr(prediction_head, "calibrator", None)
-            if calibrator is None or not getattr(calibrator, "is_active", True):
+            decision_module = getattr(prediction_head, "decision_module", None)
+            needs_calibrator_fit = calibrator is not None and getattr(calibrator, "is_active", True)
+            needs_decision_fit = decision_module is not None and getattr(decision_module, "is_trainable", False)
+
+            if not needs_calibrator_fit and not needs_decision_fit:
                 continue
 
             if task not in oof_logits or task not in oof_targets:
                 raise ValueError(
-                    f"Calibrator for task {task!r} is active, but OOF logits/targets are missing."
+                    f"Post-hoc module for task {task!r} requires OOF logits/targets, but they are missing."
                 )
 
-            calibrator.fit(
-                logits=oof_logits[task],
-                targets=oof_targets[task],
-            )
-            calibrator.enable()
+            logits = oof_logits[task]
+            targets = oof_targets[task]
+
+            if needs_calibrator_fit:
+                calibrator.fit(
+                    logits=logits,
+                    targets=targets,
+                )
+                calibrator.enable()
+
+            if needs_decision_fit:
+                probability_mapper = getattr(prediction_head, "probability_mapper", None)
+                if probability_mapper is None:
+                    raise ValueError(
+                        f"Decision module for task {task!r} cannot be fit without a probability_mapper."
+                    )
+
+                with torch.no_grad():
+                    logits_for_decision = logits
+                    if calibrator is not None and getattr(calibrator, "is_active", True):
+                        logits_for_decision = logits_for_decision.to(_module_device(calibrator))
+                        logits_for_decision = calibrator(logits_for_decision)
+                    else:
+                        logits_for_decision = logits_for_decision.cpu()
+                    probs = probability_mapper(logits_for_decision)
+
+                decision_module.fit(
+                    probs=probs.detach().cpu(),
+                    targets=targets,
+                )
+
+    def _fit_calibrators_from_oof(
+        self,
+        model: Any,
+        *,
+        oof_logits: dict[str, torch.Tensor],
+        oof_targets: dict[str, torch.Tensor],
+    ) -> None:
+        self._fit_posthoc_modules_from_oof(
+            model,
+            oof_logits=oof_logits,
+            oof_targets=oof_targets,
+        )
 
     @staticmethod
     def _assert_exact_oof_coverage(

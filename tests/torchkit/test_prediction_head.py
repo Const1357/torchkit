@@ -46,6 +46,11 @@ class DummyDecisionModule(DecisionModule):
         raise ValueError("Unsupported probabilities shape.")
 
 
+class TrainableDummyDecisionModule(DummyDecisionModule):
+    def fit_impl(self, probs: torch.Tensor, targets: torch.Tensor) -> None:
+        return None
+
+
 @pytest.fixture
 def head_out_binary_n2() -> dict[str, torch.Tensor]:
     return {
@@ -93,6 +98,14 @@ def test_prediction_head_has_active_calibrator_property():
 
     head.calibrator.enable()
     assert head.has_active_calibrator is True
+
+
+def test_prediction_head_has_trainable_decision_module_property():
+    head = PredictionHead(decision_module=DummyDecisionModule())
+    assert head.has_trainable_decision_module is False
+
+    head.decision_module = TrainableDummyDecisionModule()
+    assert head.has_trainable_decision_module is True
 
 
 def test_prediction_head_returns_none_when_inactive(head_out_binary_n2: dict[str, torch.Tensor]):

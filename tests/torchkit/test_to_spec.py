@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from torch import nn
 
 from torchkit.models.Model._model import TorchkitModel
@@ -77,11 +78,21 @@ def test_leaf_modules_to_spec_round_trip():
     assert calibrator_spec.active is True
     assert isinstance(CalibratorFactory.build(calibrator_spec), TemperatureScalingCalibrator)
 
-    decision_module = BinaryClassificationThreshold(threshold=0.7)
+    decision_module = BinaryClassificationThreshold(
+        threshold=0.7,
+        tuning_method="scan",
+        tuning_metric="f1",
+        coarse_scan_points=21,
+        refined_scan_points=41,
+    )
     decision_spec = decision_module.to_spec()
     assert isinstance(decision_spec, DecisionModuleSpec)
     assert decision_spec.cls is BinaryClassificationThreshold
-    assert decision_spec.kwargs == {"threshold": 0.7}
+    assert decision_spec.kwargs["threshold"] == pytest.approx(0.7)
+    assert decision_spec.kwargs["tuning_method"] == "scan"
+    assert decision_spec.kwargs["tuning_metric"] == "f1"
+    assert decision_spec.kwargs["coarse_scan_points"] == 21
+    assert decision_spec.kwargs["refined_scan_points"] == 41
     assert isinstance(DecisionModuleFactory.build(decision_spec), BinaryClassificationThreshold)
 
     probability_mapper = ClassificationProbabilityMapper()
@@ -152,7 +163,7 @@ def test_nested_model_to_spec_round_trip():
     assert prediction_head_spec.probability_mapper.cls is ClassificationProbabilityMapper
     assert isinstance(prediction_head_spec.decision_module, DecisionModuleSpec)
     assert prediction_head_spec.decision_module.cls is BinaryClassificationThreshold
-    assert prediction_head_spec.decision_module.kwargs["threshold"] == 0.6
+    assert prediction_head_spec.decision_module.kwargs["threshold"] == pytest.approx(0.6)
 
     rebuilt = TorchkitModelFactory.build(spec)
     assert isinstance(rebuilt, TorchkitModel)

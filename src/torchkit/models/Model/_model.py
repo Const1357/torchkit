@@ -156,6 +156,20 @@ class TorchkitModel(nn.Module):
             if self.heads[name].is_active and phead.has_active_calibrator:
                 names.add(name)
         return names
+
+    @property
+    def active_posthoc_output_names(self) -> set[str]:
+        """
+        Returns active prediction-head task names that need OOF logits for post-hoc fitting,
+        such as calibrators or trainable decision modules.
+        """
+        names = set()
+        for name, phead in self.prediction_heads.items():
+            if not self.heads[name].is_active:
+                continue
+            if phead.has_active_calibrator or phead.has_trainable_decision_module:
+                names.add(name)
+        return names
     
     # API helpers for enabling/disabling heads by name, and freezing/unfreezing backbone and heads by name ---
     def enable_head(self, head_name: str | list[str] | set[str]) -> "TorchkitModel":

@@ -18,6 +18,7 @@ from torchkit.models.adapters._feature_adapter import FeatureAdapter
 from torchkit.models.calibration._calibrator import Calibrator
 from torchkit.models.probability_mapping._probability_mapper import ProbabilityMapper
 from torchkit.models.decision._decision_module import DecisionModule
+from torchkit.models.decision.classification import BinaryClassificationThreshold
 
 from torchkit.objectives.relational import CELoss
 from torchkit.objectives.Multitask import MultitaskObjective
@@ -315,6 +316,49 @@ def test_trainer_fit_end_to_end_with_validation(
         assert trainer.state.oof_logits == {}
         assert trainer.state.oof_targets == {}
     assert len(trainer.history) == 1
+
+
+def test_trainer_collects_oof_for_trainable_decision_module_without_calibrator(
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+):
+    model = make_classification_model(with_prediction_head=True)
+    model.prediction_heads["clf"].calibrator = None
+    model.prediction_heads["clf"].decision_module = BinaryClassificationThreshold(
+        threshold=0.5,
+        tuning_method="scan",
+        tuning_metric="balanced_accuracy",
+        coarse_scan_points=11,
+        refined_scan_points=21,
+    )
+
+    objective = CELoss(
+        input_path="clf/logits",
+        target_path="batch/y",
+        reduction="mean",
+    )
+    trainer = Trainer(
+        model=model,
+        objective=objective,
+        selector_evaluator=BundleSelectorEvaluator(
+            dataset_evaluator=DatasetAccuracyEvaluator(),
+            batch_evaluator=BatchAccuracyEvaluator(),
+        ),
+        config=TrainerConfig(
+            device="cpu",
+            max_epochs=2,
+            optimizer_cls=torch.optim.SGD,
+            optimizer_kwargs={"lr": 0.1},
+        ),
+    )
+
+    trainer.fit(train_loader, val_loader)
+
+    assert "clf" in trainer.model.active_posthoc_output_names
+    assert "clf" in trainer.state.oof_logits
+    assert "clf" in trainer.state.oof_targets
+    assert trainer.state.oof_logits["clf"].shape[0] == len(val_loader.dataset)
+    assert trainer.state.oof_targets["clf"].shape[0] == len(val_loader.dataset)
 
 
 def test_trainer_fit_end_to_end_without_validation(

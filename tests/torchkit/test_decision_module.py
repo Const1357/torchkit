@@ -85,6 +85,15 @@ def test_base_decision_module_passes_valid_tensor_output(binary_probs_n: torch.T
     assert out.dtype == torch.long
 
 
+def test_base_decision_module_fit_defaults_to_noop(
+    binary_probs_n: torch.Tensor,
+):
+    module = DummyDecisionModule()
+    module.fit(binary_probs_n, torch.tensor([1, 0, 1, 0, 1], dtype=torch.long))
+
+    assert module.is_trainable is False
+
+
 def test_binary_threshold_rejects_invalid_init_threshold():
     with pytest.raises(ValueError, match="threshold must be in \\[0, 1\\]"):
         BinaryClassificationThreshold(threshold=-0.1)
@@ -93,11 +102,25 @@ def test_binary_threshold_rejects_invalid_init_threshold():
         BinaryClassificationThreshold(threshold=1.1)
 
 
+def test_binary_threshold_rejects_invalid_tuning_configuration():
+    with pytest.raises(ValueError, match="tuning_method must be one of"):
+        BinaryClassificationThreshold(tuning_method="bad")  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="tuning_metric must be one of"):
+        BinaryClassificationThreshold(tuning_method="scan", tuning_metric="bad")  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="coarse_scan_points must be >= 2"):
+        BinaryClassificationThreshold(tuning_method="scan", coarse_scan_points=1)
+
+    with pytest.raises(ValueError, match="refined_scan_points must be >= 2"):
+        BinaryClassificationThreshold(tuning_method="scan", refined_scan_points=1)
+
+
 def test_binary_threshold_property_setter_validates():
     module = BinaryClassificationThreshold(threshold=0.5)
 
     module.threshold = 0.7
-    assert module.threshold == 0.7
+    assert module.threshold == pytest.approx(0.7)
 
     with pytest.raises(ValueError, match="threshold must be in \\[0, 1\\]"):
         module.threshold = 2.0
@@ -147,6 +170,58 @@ def test_binary_threshold_rejects_invalid_shape(multiclass_probs: torch.Tensor):
 
     with pytest.raises(ValueError, match="expects binary probabilities"):
         module(multiclass_probs)
+
+
+def test_binary_threshold_training_updates_threshold_and_predictions():
+    probs = torch.tensor([0.10, 0.40, 0.60, 0.90], dtype=torch.float32)
+    targets = torch.tensor([0, 0, 1, 1], dtype=torch.long)
+    module = BinaryClassificationThreshold(
+        threshold=0.5,
+        tuning_method="youden_optimal",
+    )
+
+    module.fit(probs, targets)
+
+    assert module.is_trainable is True
+    assert module.threshold == pytest.approx(0.6)
+    assert torch.equal(module(probs), torch.tensor([0, 0, 1, 1], dtype=torch.long))
+
+
+def test_binary_threshold_training_scan_metric_updates_threshold():
+    probs = torch.tensor([0.05, 0.45, 0.55, 0.95], dtype=torch.float32)
+    targets = torch.tensor([0, 0, 1, 1], dtype=torch.long)
+    module = BinaryClassificationThreshold(
+        threshold=0.1,
+        tuning_method="scan",
+        tuning_metric="f1",
+        coarse_scan_points=21,
+        refined_scan_points=41,
+    )
+
+    module.fit(probs, targets)
+
+    assert 0.45 <= module.threshold <= 0.55
+    assert torch.equal(module(probs), torch.tensor([0, 0, 1, 1], dtype=torch.long))
+
+
+def test_binary_threshold_training_none_keeps_threshold():
+    probs = torch.tensor([0.20, 0.80], dtype=torch.float32)
+    targets = torch.tensor([0, 1], dtype=torch.long)
+    module = BinaryClassificationThreshold(
+        threshold=0.3,
+        tuning_method="none",
+    )
+
+    module.fit(probs, targets)
+
+    assert module.threshold == pytest.approx(0.3)
+
+
+def test_binary_threshold_fit_rejects_invalid_target_shape(binary_probs_n: torch.Tensor):
+    module = BinaryClassificationThreshold(tuning_method="scan")
+
+    with pytest.raises(ValueError, match="expects binary targets"):
+        module.fit(binary_probs_n, torch.ones((5, 3), dtype=torch.long))
 
 
 def test_argmax_decision_returns_class_indices(multiclass_probs: torch.Tensor):
@@ -218,13 +293,23 @@ def test_sample_topk_temperature_rejects_non_multiclass_shapes(
 def test_factory_builds_decision_module():
     spec = DecisionModuleSpec(
         cls=BinaryClassificationThreshold,
-        kwargs={"threshold": 0.7},
+        kwargs={
+            "threshold": 0.7,
+            "tuning_method": "scan",
+            "tuning_metric": "accuracy",
+            "coarse_scan_points": 31,
+            "refined_scan_points": 61,
+        },
     )
 
     module = DecisionModuleFactory.build(spec)
 
     assert isinstance(module, BinaryClassificationThreshold)
-    assert module.threshold == 0.7
+    assert module.threshold == pytest.approx(0.7)
+    assert module.tuning_method == "scan"
+    assert module.tuning_metric == "accuracy"
+    assert module.coarse_scan_points == 31
+    assert module.refined_scan_points == 61
 
 
 def test_factory_rejects_missing_cls():
@@ -265,8 +350,7 @@ def test_factory_can_load_state_dict():
     loaded = DecisionModuleFactory.build(spec, state_dict=state_dict)
 
     assert isinstance(loaded, BinaryClassificationThreshold)
-    # threshold is a plain attribute, not part of state_dict, so constructor value remains
-    assert loaded.threshold == 0.5
+    assert loaded.threshold == pytest.approx(0.8)
 
 def test_factory_builds_sample_topk_temperature():
     spec = DecisionModuleSpec(

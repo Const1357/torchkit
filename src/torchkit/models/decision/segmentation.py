@@ -26,17 +26,17 @@ class BinarySegmentationThreshold(DecisionModule):
         if not 0.0 <= threshold <= 1.0:
             raise ValueError(f"threshold must be in [0, 1], got {threshold}.")
 
-        self._threshold = float(threshold)
+        self.register_buffer("_threshold", torch.tensor(float(threshold), dtype=torch.float32))
 
     @property
     def threshold(self) -> float:
-        return self._threshold
+        return float(self._threshold.item())
 
     @threshold.setter
     def threshold(self, value: float) -> None:
         if not 0.0 <= value <= 1.0:
             raise ValueError(f"threshold must be in [0, 1], got {value}.")
-        self._threshold = float(value)
+        self._threshold.fill_(float(value))
 
     def forward_impl(self, probs: Tensor) -> Tensor:
         if probs.ndim < 3:
