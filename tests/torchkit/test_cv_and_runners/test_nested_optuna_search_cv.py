@@ -55,6 +55,7 @@ def test_nested_cv_rejects_unrebuildable_final_model_configuration():
 def test_nested_cv_logs_everything_needed_for_reporting_stratified(
     tiny_dataset,
     tiny_labels_groups,
+    tiny_report_evaluator,
     tmp_path,
 ):
     y, _groups = tiny_labels_groups
@@ -84,6 +85,7 @@ def test_nested_cv_logs_everything_needed_for_reporting_stratified(
         k_outer=2,
         k_inner=2,
         random_state=None,
+        report_evaluator=tiny_report_evaluator,
     )
 
     result = cv.run(tiny_dataset, index=y, groups=None)
@@ -135,12 +137,68 @@ def test_nested_cv_logs_everything_needed_for_reporting_stratified(
         assert outer.outer_test_metrics is not None
         assert inner.holdout_metrics is not None
         assert outer.outer_test_metrics == inner.holdout_metrics
+        assert outer.outer_test_report_results is not None
+        assert inner.holdout_report_results is not None
+        assert outer.outer_test_report_results == inner.holdout_report_results
         assert "val/classification" in outer.outer_test_metrics
         assert outer.outer_test_metrics["val/classification"] == pytest.approx(1.0)
+        assert outer.outer_test_report_results["clf/accuracy"] == pytest.approx(1.0)
 
         # Final saved model should exist inside outer-fold subdir
         assert inner.final_model_state_dict_path is not None
         assert os.path.exists(inner.final_model_state_dict_path)
+
+    assert result.outer_report_results is not None
+    assert result.outer_report_results["clf/accuracy"] == [pytest.approx(1.0), pytest.approx(1.0)]
+    assert result.outer_report_results["clf/n_samples"] == [
+        len(result.outer_results[0].outer_test_indices),
+        len(result.outer_results[1].outer_test_indices),
+    ]
+
+
+def test_nested_cv_aggregates_outer_report_results(
+    tiny_dataset,
+    tiny_labels_groups,
+    tiny_report_evaluator,
+    tmp_path,
+):
+    y, _groups = tiny_labels_groups
+
+    model_spec = make_model_spec(scale_factor=1.0)
+    trainer_spec = make_trainer_spec(
+        evaluator=AccuracySelectorEvaluator(
+            score_key="clf/logits",
+            target_key="batch/y",
+            name="classification",
+        ),
+        max_epochs=2,
+    )
+
+    cv = make_nested_cv(
+        model_spec=model_spec,
+        trainer_spec=trainer_spec,
+        outer_splitter_cls=StratifiedKFold,
+        inner_splitter_cls=StratifiedKFold,
+        parameter_grid=ParameterGrid.from_simple({"model/backbone/kwargs/scale_factor": ([1.0], "categorical")}),
+        tmp_path=tmp_path,
+        n_trials=1,
+        max_trial_attempts=3,
+        k_outer=2,
+        k_inner=2,
+        report_evaluator=tiny_report_evaluator,
+    )
+
+    result = cv.run(tiny_dataset, index=y, groups=None)
+
+    assert result.report_evaluator is not None
+    assert result.outer_report_results is not None
+    assert result.outer_report_results["clf/accuracy"] == [pytest.approx(1.0), pytest.approx(1.0)]
+    assert len(result.outer_report_results["batch_pred_labels"]) == 2
+    assert all(isinstance(x, list) for x in result.outer_report_results["batch_pred_labels"])
+
+    payload = result.to_dict()
+    assert payload["outer_report_results"]["clf/accuracy"] == [pytest.approx(1.0), pytest.approx(1.0)]
+    assert payload["report_evaluator"] is not None
 
 
 @pytest.mark.parametrize(

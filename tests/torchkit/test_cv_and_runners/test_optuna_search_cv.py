@@ -70,6 +70,7 @@ def test_optuna_search_cv_rejects_invalid_parameter_path(tmp_path):
 def test_optuna_search_cv_logs_everything_needed_for_reporting_stratified(
     tiny_dataset,
     tiny_labels_groups,
+    tiny_report_evaluator,
     tmp_path,
 ):
     y, _groups = tiny_labels_groups
@@ -97,9 +98,10 @@ def test_optuna_search_cv_logs_everything_needed_for_reporting_stratified(
         max_trial_attempts=3,
         n_splits=2,
         random_state=None,
+        report_evaluator=tiny_report_evaluator,
     )
 
-    result = cv.run(tiny_dataset, index=y, groups=None)
+    result = cv.run(tiny_dataset, index=y, groups=None, holdout_dataset=tiny_dataset)
 
     assert isinstance(result, OptunaSearchCVResult)
 
@@ -158,8 +160,12 @@ def test_optuna_search_cv_logs_everything_needed_for_reporting_stratified(
     assert result.final_model_state_dict_path is not None
     assert os.path.exists(result.final_model_state_dict_path)
 
-    # No holdout here
-    assert result.holdout_metrics is None
+    assert result.holdout_metrics is not None
+    assert result.holdout_report_results is not None
+    assert result.holdout_report_results["clf/accuracy"] == pytest.approx(1.0)
+    assert result.holdout_report_results["clf/n_samples"] == len(tiny_dataset)
+    assert isinstance(result.holdout_report_results["positive_logit_mean"], float)
+    assert isinstance(result.holdout_report_results["batch_pred_labels"], list)
 
     # Successful trial details
     trial = result.selected_trial_result()
@@ -193,6 +199,48 @@ def test_optuna_search_cv_logs_everything_needed_for_reporting_stratified(
         seen_val_indices.update(fold.val_indices)
 
     assert seen_val_indices == set(result.search_pool_indices)
+
+
+def test_optuna_search_cv_stores_holdout_report_results(
+    tiny_dataset,
+    tiny_labels_groups,
+    tiny_report_evaluator,
+    tmp_path,
+):
+    y, _groups = tiny_labels_groups
+
+    model_spec = make_model_spec(scale_factor=1.0)
+    trainer_spec = make_trainer_spec(
+        evaluator=AccuracySelectorEvaluator(
+            score_key="clf/logits",
+            target_key="batch/y",
+            name="classification",
+        ),
+        max_epochs=2,
+    )
+
+    cv = make_optuna_search_cv(
+        model_spec=model_spec,
+        trainer_spec=trainer_spec,
+        splitter_cls=StratifiedKFold,
+        parameter_grid=ParameterGrid.from_simple({"model/backbone/kwargs/scale_factor": ([1.0], "categorical")}),
+        tmp_path=tmp_path,
+        n_trials=1,
+        max_trial_attempts=3,
+        n_splits=2,
+        report_evaluator=tiny_report_evaluator,
+    )
+
+    result = cv.run(tiny_dataset, index=y, groups=None, holdout_dataset=tiny_dataset)
+
+    assert result.report_evaluator is not None
+    assert result.holdout_report_results is not None
+    assert result.holdout_report_results["clf/accuracy"] == pytest.approx(1.0)
+    assert result.holdout_report_results["clf/n_samples"] == len(tiny_dataset)
+
+    payload = result.to_dict()
+    assert payload["holdout_report_results"]["clf/accuracy"] == pytest.approx(1.0)
+    assert payload["report_evaluator"] is not None
 
 
 @pytest.mark.parametrize(

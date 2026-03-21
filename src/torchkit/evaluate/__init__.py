@@ -1,13 +1,5 @@
-# from torchkit.evaluate._evaluator import CompositeEvaluator, Evaluator
+from torchkit.evaluate.evaluate import evaluate
 
-# __all__ = [
-#     Evaluator,
-#     CompositeEvaluator,
-#     ClassificationEvaluator,
-#     RegressionEvaluator,
-#     SegmentationEvaluator,
-#     Segmentation3DEvaluator,
-#     CalibrationEvaluator,
-#     DCAEvaluator,
-#     ROCBinaryEvaluator
-# ]
+__all__ = [
+    "evaluate",
+]

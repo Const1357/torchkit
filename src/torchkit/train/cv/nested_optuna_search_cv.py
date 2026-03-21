@@ -9,6 +9,7 @@ from torch.utils.data import Subset
 
 from torchkit.data._dataset import TorchkitDataset
 from torchkit.data.split import KFoldSplitter
+from torchkit.evaluate.report.bundle import BundleReportEvaluator
 from torchkit.train.cv._base_cv import _resolve_original_indices_for_subset
 from torchkit.train.cv._base_search_cv import BaseSearchCV
 from torchkit.train.cv._optuna_results import (
@@ -28,6 +29,33 @@ class NestedOptunaSearchCV(BaseSearchCV):
     inside each OuterFoldResult.
     """
 
+    @staticmethod
+    def _aggregate_outer_report_results(
+        outer_results: list[OuterFoldResult],
+    ) -> Optional[dict[str, list[Any]]]:
+        ordered_keys: list[str] = []
+        seen_keys: set[str] = set()
+
+        for outer in outer_results:
+            report_results = outer.outer_test_report_results
+            if report_results is None:
+                continue
+            for key in report_results.keys():
+                if key not in seen_keys:
+                    ordered_keys.append(key)
+                    seen_keys.add(key)
+
+        if not ordered_keys:
+            return None
+
+        aggregated: dict[str, list[Any]] = {key: [] for key in ordered_keys}
+        for outer in outer_results:
+            report_results = outer.outer_test_report_results or {}
+            for key in ordered_keys:
+                aggregated[key].append(copy.deepcopy(report_results.get(key)))
+
+        return aggregated
+
     def __init__(
         self,
         *,
@@ -45,6 +73,7 @@ class NestedOptunaSearchCV(BaseSearchCV):
         shuffle_inner: bool = False,
         random_state: Optional[int] = None,
         calibrate: bool = True,
+        report_evaluator: Optional[BundleReportEvaluator] = None,
         final_model_dir: Optional[str] = None,
         keep_final_model_state_dict_cpu: bool = True,
     ):
@@ -60,6 +89,7 @@ class NestedOptunaSearchCV(BaseSearchCV):
             shuffle=shuffle_outer,
             random_state=random_state,
             calibrate=calibrate,
+            report_evaluator=report_evaluator,
             final_model_dir=final_model_dir,
             keep_final_model_state_dict_cpu=keep_final_model_state_dict_cpu,
         )
@@ -119,6 +149,7 @@ class NestedOptunaSearchCV(BaseSearchCV):
                 shuffle=self.shuffle_inner,
                 random_state=self.random_state,
                 calibrate=self.calibrate,
+                report_evaluator=copy.deepcopy(self.report_evaluator),
                 final_model_dir=self._outer_fold_model_dir(outer_fold),
                 keep_final_model_state_dict_cpu=self.keep_final_model_state_dict_cpu,
             )
@@ -137,14 +168,19 @@ class NestedOptunaSearchCV(BaseSearchCV):
                     outer_test_indices=copy.deepcopy(outer_test_indices),
                     inner_search_result=inner_search_result,
                     outer_test_metrics=copy.deepcopy(inner_search_result.holdout_metrics),
+                    outer_test_report_results=copy.deepcopy(inner_search_result.holdout_report_results),
                 )
             )
+
+        outer_report_results = self._aggregate_outer_report_results(outer_results)
 
         return NestedOptunaSearchCVResult(
             outer_results=outer_results,
             base_model_spec=copy.deepcopy(self.model_spec),
             base_trainer_spec=copy.deepcopy(self.trainer_spec),
             parameter_grid=copy.deepcopy(self.parameter_grid),
+            report_evaluator=copy.deepcopy(self.report_evaluator),
+            outer_report_results=copy.deepcopy(outer_report_results),
             outer_splitter_name=self.outer_splitter_cls.__name__,
             inner_splitter_name=self.inner_splitter_cls.__name__ if self.inner_splitter_cls is not None else "",
             k_outer=self.k_outer,

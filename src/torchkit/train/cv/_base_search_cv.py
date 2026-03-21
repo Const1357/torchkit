@@ -7,6 +7,7 @@ import copy
 from torch.utils.data import DataLoader, Dataset
 
 from torchkit.data.split import KFoldSplitter
+from torchkit.evaluate.report.bundle import BundleReportEvaluator
 from torchkit.models.Model._model import TorchkitModel
 from torchkit.models.Model.factory import TorchkitModelSpec
 from torchkit.train.cv._base_cv import BaseCV
@@ -66,6 +67,7 @@ class BaseSearchCV(BaseCV):
         shuffle: bool = False,
         random_state: Optional[int] = None,
         calibrate: bool = True,
+        report_evaluator: Optional[BundleReportEvaluator] = None,
         final_model_dir: Optional[str] = None,
         keep_final_model_state_dict_cpu: bool = True,
     ):
@@ -78,6 +80,7 @@ class BaseSearchCV(BaseCV):
             shuffle=shuffle,
             random_state=random_state,
             calibrate=calibrate,
+            report_evaluator=report_evaluator,
             final_model_dir=final_model_dir,
             keep_final_model_state_dict_cpu=keep_final_model_state_dict_cpu,
         )

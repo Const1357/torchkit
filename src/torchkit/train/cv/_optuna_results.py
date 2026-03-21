@@ -11,6 +11,7 @@ import pandas as pd
 import torch
 
 from torchkit.models.Model.factory import TorchkitModelFactory, TorchkitModelSpec
+from torchkit.evaluate.report.bundle import BundleReportEvaluator
 from torchkit.train.cv._base_cv import MetricDirection
 from torchkit.train.cv._optuna_search_mixin import ParameterGrid, TrialStatus
 from torchkit.train.factory import TrainerFactory, TrainerSpec
@@ -312,11 +313,13 @@ class OptunaSearchCVResult:
     final_model_state_dict_path: Optional[str] = None
 
     holdout_metrics: Optional[dict[str, Any]] = None
+    holdout_report_results: Optional[dict[str, Any]] = None
 
     # CV-level metadata
     base_model_spec: Optional[TorchkitModelSpec] = None
     base_trainer_spec: Optional[TrainerSpec] = None
     parameter_grid: Optional[ParameterGrid] = None
+    report_evaluator: Optional[BundleReportEvaluator] = None
 
     splitter_name: str = ""
     n_splits: int = 0
@@ -429,7 +432,9 @@ class OptunaSearchCVResult:
             "final_history": copy.deepcopy(self.final_history),
             "final_model_state_dict_path": self.final_model_state_dict_path,
             "holdout_metrics": copy.deepcopy(self.holdout_metrics),
+            "holdout_report_results": copy.deepcopy(self.holdout_report_results),
             "parameter_grid": copy.deepcopy(self.parameter_grid),
+            "report_evaluator": None if self.report_evaluator is None else _snapshot_object(self.report_evaluator),
             "splitter_name": self.splitter_name,
             "n_splits": self.n_splits,
             "shuffle": self.shuffle,
@@ -550,6 +555,7 @@ class OuterFoldResult:
 
     inner_search_result: OptunaSearchCVResult = field(default_factory=OptunaSearchCVResult)
     outer_test_metrics: Optional[dict[str, Any]] = None
+    outer_test_report_results: Optional[dict[str, Any]] = None
 
     @property
     def best_params(self) -> dict[str, Any]:
@@ -579,6 +585,7 @@ class OuterFoldResult:
             "outer_train_indices": copy.deepcopy(self.outer_train_indices),
             "outer_test_indices": copy.deepcopy(self.outer_test_indices),
             "outer_test_metrics": copy.deepcopy(self.outer_test_metrics),
+            "outer_test_report_results": copy.deepcopy(self.outer_test_report_results),
             "n_outer_train": len(self.outer_train_indices),
             "n_outer_test": len(self.outer_test_indices),
         }
@@ -614,6 +621,8 @@ class NestedOptunaSearchCVResult:
     base_model_spec: Optional[TorchkitModelSpec] = None
     base_trainer_spec: Optional[TrainerSpec] = None
     parameter_grid: Optional[ParameterGrid] = None
+    report_evaluator: Optional[BundleReportEvaluator] = None
+    outer_report_results: Optional[dict[str, list[Any]]] = None
 
     outer_splitter_name: str = ""
     inner_splitter_name: str = ""
@@ -667,6 +676,8 @@ class NestedOptunaSearchCVResult:
                 for r in self.outer_results
             ],
             "parameter_grid": copy.deepcopy(self.parameter_grid),
+            "report_evaluator": None if self.report_evaluator is None else _snapshot_object(self.report_evaluator),
+            "outer_report_results": copy.deepcopy(self.outer_report_results),
             "outer_splitter_name": self.outer_splitter_name,
             "inner_splitter_name": self.inner_splitter_name,
             "k_outer": self.k_outer,

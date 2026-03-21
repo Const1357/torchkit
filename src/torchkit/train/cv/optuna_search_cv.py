@@ -13,6 +13,7 @@ import torch
 from torch.utils.data import Subset
 
 from torchkit.data._dataset import TorchkitDataset
+from torchkit.evaluate.report.bundle import BundleReportEvaluator
 from torchkit.train.cv._base_cv import (
     _clone_state_dict_cpu,
     _clone_tensor_dict,
@@ -61,6 +62,7 @@ class OptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
         shuffle: bool = False,
         random_state: Optional[int] = None,
         calibrate: bool = True,
+        report_evaluator: Optional[BundleReportEvaluator] = None,
         final_model_dir: Optional[str] = None,
         keep_final_model_state_dict_cpu: bool = True,
     ):
@@ -76,6 +78,7 @@ class OptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
             shuffle=shuffle,
             random_state=random_state,
             calibrate=calibrate,
+            report_evaluator=report_evaluator,
             final_model_dir=final_model_dir,
             keep_final_model_state_dict_cpu=keep_final_model_state_dict_cpu,
         )
@@ -338,8 +341,10 @@ class OptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
         )
 
         holdout_metrics = None
+        holdout_report_results = None
         if holdout_dataset is not None:
             holdout_metrics = self._evaluate_holdout(final_trainer, holdout_dataset)
+            holdout_report_results = self._evaluate_report(final_trainer, holdout_dataset)
 
         final_model_state_dict_cpu = final_trainer._get_model_state_dict_cpu()
         final_model_state_dict_path = None
@@ -379,9 +384,11 @@ class OptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
             final_model_state_dict_cpu=final_model_state_dict_cpu if self.keep_final_model_state_dict_cpu else None,
             final_model_state_dict_path=final_model_state_dict_path,
             holdout_metrics=copy.deepcopy(holdout_metrics),
+            holdout_report_results=copy.deepcopy(holdout_report_results),
             base_model_spec=copy.deepcopy(self.model_spec),
             base_trainer_spec=copy.deepcopy(self.trainer_spec),
             parameter_grid=copy.deepcopy(self.parameter_grid),
+            report_evaluator=copy.deepcopy(self.report_evaluator),
             splitter_name=self.splitter_cls.__name__,
             n_splits=self.n_splits,
             shuffle=self.shuffle,

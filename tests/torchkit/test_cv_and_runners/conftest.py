@@ -25,6 +25,9 @@ from torchkit.train.trainer import Trainer, TrainerConfig
 from torchkit.train.cv._optuna_search_mixin import ParameterGrid
 
 from torchkit.objectives.relational import CELoss
+from torchkit.evaluate.report._report_evaluator import ReportEvaluator
+from torchkit.evaluate.report.bundle import BundleReportEvaluator
+from torchkit.evaluate.report import CompositeReportEvaluator
 from torchkit.evaluate.select import AccuracySelectorEvaluator, SelectorEvaluator
 from torchkit.evaluate.select.bundle import BundleSelectorEvaluator
 
@@ -152,6 +155,54 @@ class ErrorRateEvaluator(SelectorEvaluator):
         return (preds != targets).float().mean()
 
 
+class PositiveLogitMeanReportEvaluator(ReportEvaluator):
+    def __init__(
+        self,
+        *,
+        score_key: str,
+        name: str = "batch_logits",
+    ) -> None:
+        super().__init__(name=name)
+        self.score_key = score_key
+
+    @property
+    def required_keys(self) -> tuple[str, ...]:
+        return (self.score_key,)
+
+    def metrics(self, *, inputs: dict[str, Any]) -> dict[str, Any]:
+        logits = self.resolve(inputs, self.score_key).detach()
+        return {
+            "positive_logit_mean": float(logits[:, 1].float().mean().item()),
+            "batch_pred_labels": torch.argmax(logits, dim=1).detach().cpu().tolist(),
+        }
+
+
+class AccuracyReportEvaluator(ReportEvaluator):
+    def __init__(
+        self,
+        *,
+        score_key: str,
+        target_key: str,
+        name: str = "clf",
+    ) -> None:
+        super().__init__(name=name)
+        self.score_key = score_key
+        self.target_key = target_key
+
+    @property
+    def required_keys(self) -> tuple[str, ...]:
+        return (self.score_key, self.target_key)
+
+    def metrics(self, *, inputs: dict[str, Any]) -> dict[str, Any]:
+        logits = self.resolve(inputs, self.score_key).detach()
+        targets = self.resolve(inputs, self.target_key).detach()
+        preds = torch.argmax(logits, dim=1)
+        return {
+            "accuracy": float((preds == targets).float().mean().item()),
+            "n_samples": int(targets.shape[0]),
+        }
+
+
 def make_labels_and_groups() -> tuple[list[int], list[int]]:
     y: list[int] = []
     groups: list[int] = []
@@ -225,6 +276,7 @@ def make_optuna_search_cv(
     n_splits: int = 2,
     random_state: Optional[int] = None,
     calibrate: bool = True,
+    report_evaluator: Optional[BundleReportEvaluator] = None,
     keep_final_model_state_dict_cpu: bool = True,
 ) -> OptunaSearchCV:
     return OptunaSearchCV(
@@ -239,6 +291,7 @@ def make_optuna_search_cv(
         shuffle=False,
         random_state=random_state,
         calibrate=calibrate,
+        report_evaluator=report_evaluator,
         final_model_dir=str(tmp_path),
         keep_final_model_state_dict_cpu=keep_final_model_state_dict_cpu,
     )
@@ -258,6 +311,7 @@ def make_nested_cv(
     k_inner: int = 2,
     random_state: Optional[int] = None,
     calibrate: bool = True,
+    report_evaluator: Optional[BundleReportEvaluator] = None,
     keep_final_model_state_dict_cpu: bool = True,
 ) -> NestedOptunaSearchCV:
     return NestedOptunaSearchCV(
@@ -275,6 +329,7 @@ def make_nested_cv(
         shuffle_inner=False,
         random_state=random_state,
         calibrate=calibrate,
+        report_evaluator=report_evaluator,
         final_model_dir=str(tmp_path),
         keep_final_model_state_dict_cpu=keep_final_model_state_dict_cpu,
     )
@@ -288,3 +343,20 @@ def tiny_dataset() -> TinyClassificationDataset:
 @pytest.fixture
 def tiny_labels_groups() -> tuple[list[int], list[int]]:
     return make_labels_and_groups()
+
+
+@pytest.fixture
+def tiny_report_evaluator() -> BundleReportEvaluator:
+    return BundleReportEvaluator(
+        batch_evaluator=PositiveLogitMeanReportEvaluator(score_key="clf/logits"),
+        dataset_evaluator=CompositeReportEvaluator(
+            [
+                AccuracyReportEvaluator(
+                    score_key="clf/logits",
+                    target_key="batch/y",
+                    name="clf",
+                )
+            ],
+            name="report_bundle",
+        ),
+    )

@@ -11,6 +11,8 @@ from torch.utils.data import DataLoader, Dataset, Subset
 
 from torchkit.data._dataset import TorchkitDataset
 from torchkit.data.split import KFoldSplitter
+from torchkit.evaluate import evaluate as evaluate_model
+from torchkit.evaluate.report.bundle import BundleReportEvaluator
 from torchkit.models.Model._model import TorchkitModel
 from torchkit.models.Model.factory import TorchkitModelSpec
 from torchkit.train.factory import TrainerSpec
@@ -119,6 +121,7 @@ class BaseCV:
         shuffle: bool = False,
         random_state: Optional[int] = None,
         calibrate: bool = True,
+        report_evaluator: Optional[BundleReportEvaluator] = None,
         final_model_dir: Optional[str] = None,
         keep_final_model_state_dict_cpu: bool = True,
     ):
@@ -131,6 +134,7 @@ class BaseCV:
         self.random_state = random_state
 
         self.calibrate = bool(calibrate)
+        self.report_evaluator = copy.deepcopy(report_evaluator)
         self.final_model_dir = final_model_dir
         self.keep_final_model_state_dict_cpu = bool(keep_final_model_state_dict_cpu)
 
@@ -226,6 +230,25 @@ class BaseCV:
         finally:
             trainer.state = state_backup
         return metrics
+
+    def _evaluate_report(
+        self,
+        trainer: Trainer,
+        dataset_subset: Subset | Dataset,
+    ) -> Optional[dict[str, Any]]:
+        if self.report_evaluator is None:
+            return None
+
+        return evaluate_model(
+            trainer.model,
+            dataset_subset,
+            self.report_evaluator,
+            device=trainer.device,
+            backbone_kwargs=trainer.config.backbone_kwargs,
+            head_kwargs=trainer.config.head_kwargs,
+            use_amp=trainer.config.use_amp,
+            dataloader_factory=lambda ds: self.dataloader_factory(ds, False),
+        )
 
     def _fit_posthoc_modules_from_oof(
         self,
