@@ -86,6 +86,7 @@ def test_nested_cv_logs_everything_needed_for_reporting_stratified(
         k_inner=2,
         random_state=None,
         report_evaluator=tiny_report_evaluator,
+        logging=True,
     )
 
     result = cv.run(tiny_dataset, index=y, groups=None)
@@ -100,6 +101,10 @@ def test_nested_cv_logs_everything_needed_for_reporting_stratified(
     assert result.selection_metric_name == "dataset:classification"
     assert result.selection_metric_direction == "maximize"
     assert result.final_model_dir == str(tmp_path)
+    assert result.log_dir is not None
+    assert result.run_log_file is not None
+    assert os.path.isdir(result.log_dir)
+    assert os.path.isfile(result.run_log_file)
 
     assert len(result.outer_results) == 2
     all_dataset_indices = set(range(len(tiny_dataset)))
@@ -132,6 +137,10 @@ def test_nested_cv_logs_everything_needed_for_reporting_stratified(
         assert sorted(trial.aggregate_oof_sample_indices) == sorted(inner.search_pool_indices)
         assert sorted(inner.search_pool_indices) == sorted(outer.outer_train_indices)
         assert set(trial.aggregate_oof_sample_indices).isdisjoint(set(outer.outer_test_indices))
+        assert trial.aggregate_fold_report_results is not None
+        assert trial.aggregate_fold_report_results["clf/accuracy"] == [pytest.approx(1.0), pytest.approx(1.0)]
+        assert inner.selected_fold_report_results is not None
+        assert inner.selected_fold_report_results == trial.aggregate_fold_report_results
 
         # Outer holdout must be stored both places by current design
         assert outer.outer_test_metrics is not None
@@ -143,10 +152,23 @@ def test_nested_cv_logs_everything_needed_for_reporting_stratified(
         assert "val/classification" in outer.outer_test_metrics
         assert outer.outer_test_metrics["val/classification"] == pytest.approx(1.0)
         assert outer.outer_test_report_results["clf/accuracy"] == pytest.approx(1.0)
+        assert outer.log_file is not None
+        assert os.path.isfile(outer.log_file)
+        assert inner.log_dir is not None
+        assert inner.run_log_file is not None
+        assert inner.final_refit_log_file is not None
+        assert os.path.isdir(inner.log_dir)
+        assert os.path.isfile(inner.run_log_file)
+        assert os.path.isfile(inner.final_refit_log_file)
 
         # Final saved model should exist inside outer-fold subdir
         assert inner.final_model_state_dict_path is not None
         assert os.path.exists(inner.final_model_state_dict_path)
+
+        for fold in trial.fold_results:
+            assert fold.report_results is not None
+            assert fold.report_results["clf/accuracy"] == pytest.approx(1.0)
+            assert fold.report_results["clf/n_samples"] == len(fold.val_indices)
 
     assert result.outer_report_results is not None
     assert result.outer_report_results["clf/accuracy"] == [pytest.approx(1.0), pytest.approx(1.0)]
@@ -186,6 +208,7 @@ def test_nested_cv_aggregates_outer_report_results(
         k_outer=2,
         k_inner=2,
         report_evaluator=tiny_report_evaluator,
+        logging=True,
     )
 
     result = cv.run(tiny_dataset, index=y, groups=None)
@@ -199,6 +222,8 @@ def test_nested_cv_aggregates_outer_report_results(
     payload = result.to_dict()
     assert payload["outer_report_results"]["clf/accuracy"] == [pytest.approx(1.0), pytest.approx(1.0)]
     assert payload["report_evaluator"] is not None
+    assert payload["log_dir"] == result.log_dir
+    assert payload["run_log_file"] == result.run_log_file
 
 
 @pytest.mark.parametrize(

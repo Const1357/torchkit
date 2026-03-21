@@ -10,7 +10,8 @@ from torch.utils.data import Subset
 from torchkit.data._dataset import TorchkitDataset
 from torchkit.data.split import KFoldSplitter
 from torchkit.evaluate.report.bundle import BundleReportEvaluator
-from torchkit.train.cv._base_cv import _resolve_original_indices_for_subset
+from torchkit.train._event_log import JsonlEventLogger
+from torchkit.train.cv._base_cv import _aggregate_report_results, _resolve_original_indices_for_subset
 from torchkit.train.cv._base_search_cv import BaseSearchCV
 from torchkit.train.cv._optuna_results import (
     NestedOptunaSearchCVResult,
@@ -28,33 +29,6 @@ class NestedOptunaSearchCV(BaseSearchCV):
     The resulting OptunaSearchCVResult is stored as a reusable container
     inside each OuterFoldResult.
     """
-
-    @staticmethod
-    def _aggregate_outer_report_results(
-        outer_results: list[OuterFoldResult],
-    ) -> Optional[dict[str, list[Any]]]:
-        ordered_keys: list[str] = []
-        seen_keys: set[str] = set()
-
-        for outer in outer_results:
-            report_results = outer.outer_test_report_results
-            if report_results is None:
-                continue
-            for key in report_results.keys():
-                if key not in seen_keys:
-                    ordered_keys.append(key)
-                    seen_keys.add(key)
-
-        if not ordered_keys:
-            return None
-
-        aggregated: dict[str, list[Any]] = {key: [] for key in ordered_keys}
-        for outer in outer_results:
-            report_results = outer.outer_test_report_results or {}
-            for key in ordered_keys:
-                aggregated[key].append(copy.deepcopy(report_results.get(key)))
-
-        return aggregated
 
     def __init__(
         self,
@@ -74,6 +48,8 @@ class NestedOptunaSearchCV(BaseSearchCV):
         random_state: Optional[int] = None,
         calibrate: bool = True,
         report_evaluator: Optional[BundleReportEvaluator] = None,
+        logging: bool = False,
+        _log_root_dir: Optional[str] = None,
         final_model_dir: Optional[str] = None,
         keep_final_model_state_dict_cpu: bool = True,
     ):
@@ -90,6 +66,8 @@ class NestedOptunaSearchCV(BaseSearchCV):
             random_state=random_state,
             calibrate=calibrate,
             report_evaluator=report_evaluator,
+            logging=logging,
+            _log_root_dir=_log_root_dir,
             final_model_dir=final_model_dir,
             keep_final_model_state_dict_cpu=keep_final_model_state_dict_cpu,
         )
@@ -120,6 +98,31 @@ class NestedOptunaSearchCV(BaseSearchCV):
         groups: Optional[Any] = None,
     ) -> NestedOptunaSearchCVResult:
         outer_results: list[OuterFoldResult] = []
+        run_logger = None
+        run_log_file = None
+        if self.logging and self.log_dir is not None:
+            run_log_file = os.path.join(self.log_dir, "nested_search.log.jsonl")
+            run_logger = JsonlEventLogger(
+                run_log_file,
+                scope="nested_optuna_search_cv",
+                echo_console=True,
+            )
+            run_logger.emit(
+                "nested_cv_run_start",
+                payload={
+                    "k_outer": self.k_outer,
+                    "k_inner": self.k_inner,
+                    "n_trials": self.n_trials,
+                    "outer_splitter_name": self.outer_splitter_cls.__name__,
+                    "inner_splitter_name": self.inner_splitter_cls.__name__,
+                    "dataset_size": len(dataset),
+                    "log_dir": self.log_dir,
+                },
+                message=(
+                    f"NestedOptunaSearchCV started: k_outer={self.k_outer}, k_inner={self.k_inner}, "
+                    f"n_trials={self.n_trials}. Logging to {run_log_file}."
+                ),
+            )
 
         selection_metric_name = self._selection_metric_name()
         selection_metric_direction = self._selection_metric_direction()
@@ -136,6 +139,29 @@ class NestedOptunaSearchCV(BaseSearchCV):
 
             outer_train_indices = _resolve_original_indices_for_subset(outer_train_subset)
             outer_test_indices = _resolve_original_indices_for_subset(outer_test_subset)
+            outer_log_file = None
+            outer_logger = None
+            if self.logging and self.log_dir is not None:
+                outer_log_file = os.path.join(self.log_dir, "outer_folds", f"outer_fold_{outer_fold:03d}.log.jsonl")
+                outer_logger = JsonlEventLogger(
+                    outer_log_file,
+                    scope="nested_outer_fold",
+                    echo_console=True,
+                    context={"outer_fold": outer_fold},
+                )
+                outer_logger.emit(
+                    "nested_outer_fold_start",
+                    payload={
+                        "outer_fold": outer_fold,
+                        "n_outer_train": len(outer_train_indices),
+                        "n_outer_test": len(outer_test_indices),
+                    },
+                    message=(
+                        f"Outer fold {outer_fold} started "
+                        f"(n_outer_train={len(outer_train_indices)}, n_outer_test={len(outer_test_indices)}). "
+                        f"Logging to {outer_log_file}."
+                    ),
+                )
 
             inner_search = OptunaSearchCV(
                 model_spec=copy.deepcopy(self.model_spec),
@@ -150,6 +176,12 @@ class NestedOptunaSearchCV(BaseSearchCV):
                 random_state=self.random_state,
                 calibrate=self.calibrate,
                 report_evaluator=copy.deepcopy(self.report_evaluator),
+                logging=self.logging,
+                _log_root_dir=(
+                    os.path.join(self.log_dir, "outer_folds", f"outer_fold_{outer_fold:03d}", "inner_search")
+                    if self.logging and self.log_dir is not None
+                    else None
+                ),
                 final_model_dir=self._outer_fold_model_dir(outer_fold),
                 keep_final_model_state_dict_cpu=self.keep_final_model_state_dict_cpu,
             )
@@ -169,10 +201,41 @@ class NestedOptunaSearchCV(BaseSearchCV):
                     inner_search_result=inner_search_result,
                     outer_test_metrics=copy.deepcopy(inner_search_result.holdout_metrics),
                     outer_test_report_results=copy.deepcopy(inner_search_result.holdout_report_results),
+                    log_file=outer_log_file,
                 )
             )
+            if outer_logger is not None:
+                outer_logger.emit(
+                    "nested_outer_fold_end",
+                    payload={
+                        "outer_fold": outer_fold,
+                        "best_trial_number": inner_search_result.best_trial_number,
+                        "best_metric": inner_search_result.best_metric,
+                        "best_selection_score": inner_search_result.best_selection_score,
+                        "outer_test_metrics": copy.deepcopy(inner_search_result.holdout_metrics),
+                        "outer_test_report_results": copy.deepcopy(inner_search_result.holdout_report_results),
+                        "inner_log_dir": inner_search_result.log_dir,
+                    },
+                    message=(
+                        f"Outer fold {outer_fold} ended. "
+                        f"best_trial={inner_search_result.best_trial_number}, "
+                        f"best_metric={inner_search_result.best_metric}, "
+                        f"inner_log_dir={inner_search_result.log_dir}."
+                    ),
+                )
 
-        outer_report_results = self._aggregate_outer_report_results(outer_results)
+        outer_report_results = _aggregate_report_results(
+            [outer.outer_test_report_results for outer in outer_results]
+        )
+        if run_logger is not None:
+            run_logger.emit(
+                "nested_cv_run_end",
+                payload={
+                    "n_outer_folds": len(outer_results),
+                    "outer_report_results": copy.deepcopy(outer_report_results),
+                },
+                message=f"NestedOptunaSearchCV ended after {len(outer_results)} outer folds.",
+            )
 
         return NestedOptunaSearchCVResult(
             outer_results=outer_results,
@@ -181,6 +244,8 @@ class NestedOptunaSearchCV(BaseSearchCV):
             parameter_grid=copy.deepcopy(self.parameter_grid),
             report_evaluator=copy.deepcopy(self.report_evaluator),
             outer_report_results=copy.deepcopy(outer_report_results),
+            log_dir=self.log_dir,
+            run_log_file=run_log_file,
             outer_splitter_name=self.outer_splitter_cls.__name__,
             inner_splitter_name=self.inner_splitter_cls.__name__ if self.inner_splitter_cls is not None else "",
             k_outer=self.k_outer,

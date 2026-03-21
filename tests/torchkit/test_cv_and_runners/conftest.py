@@ -277,6 +277,7 @@ def make_optuna_search_cv(
     random_state: Optional[int] = None,
     calibrate: bool = True,
     report_evaluator: Optional[BundleReportEvaluator] = None,
+    logging: bool = False,
     keep_final_model_state_dict_cpu: bool = True,
 ) -> OptunaSearchCV:
     return OptunaSearchCV(
@@ -292,6 +293,7 @@ def make_optuna_search_cv(
         random_state=random_state,
         calibrate=calibrate,
         report_evaluator=report_evaluator,
+        logging=logging,
         final_model_dir=str(tmp_path),
         keep_final_model_state_dict_cpu=keep_final_model_state_dict_cpu,
     )
@@ -312,6 +314,7 @@ def make_nested_cv(
     random_state: Optional[int] = None,
     calibrate: bool = True,
     report_evaluator: Optional[BundleReportEvaluator] = None,
+    logging: bool = False,
     keep_final_model_state_dict_cpu: bool = True,
 ) -> NestedOptunaSearchCV:
     return NestedOptunaSearchCV(
@@ -330,6 +333,7 @@ def make_nested_cv(
         random_state=random_state,
         calibrate=calibrate,
         report_evaluator=report_evaluator,
+        logging=logging,
         final_model_dir=str(tmp_path),
         keep_final_model_state_dict_cpu=keep_final_model_state_dict_cpu,
     )

@@ -16,6 +16,7 @@ class TrainerSpec:
     cls: type[Trainer] | None = Trainer
     objective: Optional[Objective] = None
     selector_evaluator: Optional[BundleSelectorEvaluator] = None
+    logging: bool = False
     config: TrainerConfig = field(default_factory=TrainerConfig)
 
 
@@ -43,6 +44,7 @@ class TrainerFactory:
             objective=spec.objective,
             selector_evaluator=spec.selector_evaluator,
             config=copy.deepcopy(spec.config),
+            logging=spec.logging,
         )
 
         return trainer

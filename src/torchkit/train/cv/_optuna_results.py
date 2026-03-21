@@ -166,6 +166,8 @@ class FoldResult:
     oof_logits: dict[str, torch.Tensor] = field(default_factory=dict)
     oof_targets: dict[str, torch.Tensor] = field(default_factory=dict)
     oof_sample_indices: list[int] = field(default_factory=list)
+    report_results: Optional[dict[str, Any]] = None
+    log_file: Optional[str] = None
 
     def to_dict(self, *, include_tensors: bool = False) -> dict[str, Any]:
         out = {
@@ -175,6 +177,8 @@ class FoldResult:
             "best_metric": self.best_metric,
             "best_epoch": self.best_epoch,
             "oof_sample_indices": copy.deepcopy(self.oof_sample_indices),
+            "report_results": copy.deepcopy(self.report_results),
+            "log_file": self.log_file,
             "n_train": len(self.train_indices),
             "n_val": len(self.val_indices),
         }
@@ -216,6 +220,8 @@ class OptunaTrialResult:
     aggregate_selection_score: Optional[float]
 
     fold_results: list[FoldResult] = field(default_factory=list)
+    aggregate_fold_report_results: Optional[dict[str, list[Any]]] = None
+    log_file: Optional[str] = None
 
     aggregate_oof_logits: dict[str, torch.Tensor] = field(default_factory=dict)
     aggregate_oof_targets: dict[str, torch.Tensor] = field(default_factory=dict)
@@ -236,6 +242,8 @@ class OptunaTrialResult:
             "status": self.status,
             "aggregate_metric": self.aggregate_metric,
             "aggregate_selection_score": self.aggregate_selection_score,
+            "aggregate_fold_report_results": copy.deepcopy(self.aggregate_fold_report_results),
+            "log_file": self.log_file,
             "aggregate_oof_sample_indices": copy.deepcopy(self.aggregate_oof_sample_indices),
             "error_message": self.error_message,
             "fold_results": [fr.to_dict(include_tensors=include_tensors) for fr in self.fold_results],
@@ -292,6 +300,7 @@ class OptunaSearchCVResult:
     pruned_trials: int = 0
 
     selected_fold_results: list[FoldResult] = field(default_factory=list)
+    selected_fold_report_results: Optional[dict[str, list[Any]]] = None
     selected_metric_mean: Optional[float] = None
     selected_metric_std: Optional[float] = None
     selected_metric_min: Optional[float] = None
@@ -320,6 +329,9 @@ class OptunaSearchCVResult:
     base_trainer_spec: Optional[TrainerSpec] = None
     parameter_grid: Optional[ParameterGrid] = None
     report_evaluator: Optional[BundleReportEvaluator] = None
+    log_dir: Optional[str] = None
+    run_log_file: Optional[str] = None
+    final_refit_log_file: Optional[str] = None
 
     splitter_name: str = ""
     n_splits: int = 0
@@ -419,6 +431,7 @@ class OptunaSearchCVResult:
             "selected_fold_results": [
                 fr.to_dict(include_tensors=include_tensors) for fr in self.selected_fold_results
             ],
+            "selected_fold_report_results": copy.deepcopy(self.selected_fold_report_results),
             "selected_metric_mean": self.selected_metric_mean,
             "selected_metric_std": self.selected_metric_std,
             "selected_metric_min": self.selected_metric_min,
@@ -435,6 +448,9 @@ class OptunaSearchCVResult:
             "holdout_report_results": copy.deepcopy(self.holdout_report_results),
             "parameter_grid": copy.deepcopy(self.parameter_grid),
             "report_evaluator": None if self.report_evaluator is None else _snapshot_object(self.report_evaluator),
+            "log_dir": self.log_dir,
+            "run_log_file": self.run_log_file,
+            "final_refit_log_file": self.final_refit_log_file,
             "splitter_name": self.splitter_name,
             "n_splits": self.n_splits,
             "shuffle": self.shuffle,
@@ -556,6 +572,7 @@ class OuterFoldResult:
     inner_search_result: OptunaSearchCVResult = field(default_factory=OptunaSearchCVResult)
     outer_test_metrics: Optional[dict[str, Any]] = None
     outer_test_report_results: Optional[dict[str, Any]] = None
+    log_file: Optional[str] = None
 
     @property
     def best_params(self) -> dict[str, Any]:
@@ -586,6 +603,7 @@ class OuterFoldResult:
             "outer_test_indices": copy.deepcopy(self.outer_test_indices),
             "outer_test_metrics": copy.deepcopy(self.outer_test_metrics),
             "outer_test_report_results": copy.deepcopy(self.outer_test_report_results),
+            "log_file": self.log_file,
             "n_outer_train": len(self.outer_train_indices),
             "n_outer_test": len(self.outer_test_indices),
         }
@@ -623,6 +641,8 @@ class NestedOptunaSearchCVResult:
     parameter_grid: Optional[ParameterGrid] = None
     report_evaluator: Optional[BundleReportEvaluator] = None
     outer_report_results: Optional[dict[str, list[Any]]] = None
+    log_dir: Optional[str] = None
+    run_log_file: Optional[str] = None
 
     outer_splitter_name: str = ""
     inner_splitter_name: str = ""
@@ -678,6 +698,8 @@ class NestedOptunaSearchCVResult:
             "parameter_grid": copy.deepcopy(self.parameter_grid),
             "report_evaluator": None if self.report_evaluator is None else _snapshot_object(self.report_evaluator),
             "outer_report_results": copy.deepcopy(self.outer_report_results),
+            "log_dir": self.log_dir,
+            "run_log_file": self.run_log_file,
             "outer_splitter_name": self.outer_splitter_name,
             "inner_splitter_name": self.inner_splitter_name,
             "k_outer": self.k_outer,

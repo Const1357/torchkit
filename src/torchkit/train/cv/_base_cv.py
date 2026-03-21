@@ -15,6 +15,7 @@ from torchkit.evaluate import evaluate as evaluate_model
 from torchkit.evaluate.report.bundle import BundleReportEvaluator
 from torchkit.models.Model._model import TorchkitModel
 from torchkit.models.Model.factory import TorchkitModelSpec
+from torchkit.train._event_log import default_log_dir
 from torchkit.train.factory import TrainerSpec
 from torchkit.train.trainer import Trainer
 
@@ -71,6 +72,32 @@ def _concat_tensor_dicts(dicts: list[dict[str, torch.Tensor]]) -> dict[str, torc
     return merged
 
 
+def _aggregate_report_results(
+    results: list[Optional[dict[str, Any]]],
+) -> Optional[dict[str, list[Any]]]:
+    ordered_keys: list[str] = []
+    seen_keys: set[str] = set()
+
+    for result in results:
+        if result is None:
+            continue
+        for key in result.keys():
+            if key not in seen_keys:
+                ordered_keys.append(key)
+                seen_keys.add(key)
+
+    if not ordered_keys:
+        return None
+
+    aggregated: dict[str, list[Any]] = {key: [] for key in ordered_keys}
+    for result in results:
+        payload = result or {}
+        for key in ordered_keys:
+            aggregated[key].append(copy.deepcopy(payload.get(key)))
+
+    return aggregated
+
+
 def _module_device(module: nn.Module) -> torch.device:
     for param in module.parameters():
         return param.device
@@ -122,6 +149,8 @@ class BaseCV:
         random_state: Optional[int] = None,
         calibrate: bool = True,
         report_evaluator: Optional[BundleReportEvaluator] = None,
+        logging: bool = False,
+        _log_root_dir: Optional[str] = None,
         final_model_dir: Optional[str] = None,
         keep_final_model_state_dict_cpu: bool = True,
     ):
@@ -135,8 +164,19 @@ class BaseCV:
 
         self.calibrate = bool(calibrate)
         self.report_evaluator = copy.deepcopy(report_evaluator)
+        self.logging = bool(logging)
         self.final_model_dir = final_model_dir
         self.keep_final_model_state_dict_cpu = bool(keep_final_model_state_dict_cpu)
+        if _log_root_dir is not None:
+            self.log_dir = _log_root_dir
+            os.makedirs(self.log_dir, exist_ok=True)
+        elif self.logging:
+            self.log_dir = default_log_dir(
+                prefix=self.__class__.__name__.lower(),
+                base_dir=self.final_model_dir,
+            )
+        else:
+            self.log_dir = None
 
         if self.final_model_dir is not None:
             os.makedirs(self.final_model_dir, exist_ok=True)

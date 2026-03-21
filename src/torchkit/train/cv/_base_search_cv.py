@@ -68,6 +68,8 @@ class BaseSearchCV(BaseCV):
         random_state: Optional[int] = None,
         calibrate: bool = True,
         report_evaluator: Optional[BundleReportEvaluator] = None,
+        logging: bool = False,
+        _log_root_dir: Optional[str] = None,
         final_model_dir: Optional[str] = None,
         keep_final_model_state_dict_cpu: bool = True,
     ):
@@ -81,6 +83,8 @@ class BaseSearchCV(BaseCV):
             random_state=random_state,
             calibrate=calibrate,
             report_evaluator=report_evaluator,
+            logging=logging,
+            _log_root_dir=_log_root_dir,
             final_model_dir=final_model_dir,
             keep_final_model_state_dict_cpu=keep_final_model_state_dict_cpu,
         )

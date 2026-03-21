@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import json
+import os
 
 import optuna
 import pytest
@@ -388,6 +390,52 @@ def test_trainer_fit_end_to_end_without_validation(
     assert trainer.state.best_epoch is None
     assert trainer.state.best_metric is None
     assert len(trainer.history) == 1
+
+
+def test_trainer_logging_writes_structured_jsonl(
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+
+    model = make_classification_model(with_prediction_head=False)
+    objective = CELoss(
+        input_path="clf/logits",
+        target_path="batch/y",
+        reduction="mean",
+    )
+    trainer = Trainer(
+        model=model,
+        objective=objective,
+        selector_evaluator=BundleSelectorEvaluator(
+            dataset_evaluator=DatasetAccuracyEvaluator(),
+        ),
+        config=TrainerConfig(
+            device="cpu",
+            max_epochs=2,
+            optimizer_cls=torch.optim.SGD,
+            optimizer_kwargs={"lr": 0.1},
+        ),
+        logging=True,
+    )
+
+    trainer.fit(train_loader, val_loader)
+
+    assert trainer.log_dir is not None
+    assert trainer.log_file is not None
+    assert os.path.isdir(trainer.log_dir)
+    assert os.path.isfile(trainer.log_file)
+
+    with open(trainer.log_file, "r", encoding="utf-8") as f:
+        entries = [json.loads(line) for line in f if line.strip()]
+
+    events = [entry["event"] for entry in entries]
+    assert "trainer_fit_start" in events
+    assert "trainer_epoch_end" in events
+    assert "trainer_fit_end" in events
+    assert all(entry["log_file"] == trainer.log_file for entry in entries)
 
 
 # ============================================================

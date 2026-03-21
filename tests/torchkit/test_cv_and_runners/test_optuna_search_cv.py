@@ -99,6 +99,7 @@ def test_optuna_search_cv_logs_everything_needed_for_reporting_stratified(
         n_splits=2,
         random_state=None,
         report_evaluator=tiny_report_evaluator,
+        logging=True,
     )
 
     result = cv.run(tiny_dataset, index=y, groups=None, holdout_dataset=tiny_dataset)
@@ -134,6 +135,9 @@ def test_optuna_search_cv_logs_everything_needed_for_reporting_stratified(
 
     # Selected-fold reporting
     assert len(result.selected_fold_results) == 2
+    assert result.selected_fold_report_results is not None
+    assert result.selected_fold_report_results["clf/accuracy"] == [pytest.approx(1.0), pytest.approx(1.0)]
+    assert result.selected_fold_report_results["clf/n_samples"] == [len(f.val_indices) for f in result.selected_fold_results]
     assert result.selected_metric_mean == pytest.approx(1.0)
     assert result.selected_metric_std == pytest.approx(0.0)
     assert result.selected_metric_min == pytest.approx(1.0)
@@ -159,6 +163,12 @@ def test_optuna_search_cv_logs_everything_needed_for_reporting_stratified(
     assert result.final_model_state_dict_cpu is not None
     assert result.final_model_state_dict_path is not None
     assert os.path.exists(result.final_model_state_dict_path)
+    assert result.log_dir is not None
+    assert result.run_log_file is not None
+    assert result.final_refit_log_file is not None
+    assert os.path.isdir(result.log_dir)
+    assert os.path.isfile(result.run_log_file)
+    assert os.path.isfile(result.final_refit_log_file)
 
     assert result.holdout_metrics is not None
     assert result.holdout_report_results is not None
@@ -173,6 +183,10 @@ def test_optuna_search_cv_logs_everything_needed_for_reporting_stratified(
     assert trial.params["trainer/config/max_epochs"] == 2
     assert trial.aggregate_metric == pytest.approx(1.0)
     assert trial.aggregate_selection_score == pytest.approx(1.0)
+    assert trial.aggregate_fold_report_results is not None
+    assert trial.aggregate_fold_report_results["clf/accuracy"] == [pytest.approx(1.0), pytest.approx(1.0)]
+    assert trial.log_file is not None
+    assert os.path.isfile(trial.log_file)
     assert trial.error_message is None
     assert trial.error_traceback is None
 
@@ -195,6 +209,11 @@ def test_optuna_search_cv_logs_everything_needed_for_reporting_stratified(
         assert "clf" in fold.oof_targets
         assert fold.oof_logits["clf"].shape[0] == len(fold.val_indices)
         assert fold.oof_targets["clf"].shape[0] == len(fold.val_indices)
+        assert fold.report_results is not None
+        assert fold.report_results["clf/accuracy"] == pytest.approx(1.0)
+        assert fold.report_results["clf/n_samples"] == len(fold.val_indices)
+        assert fold.log_file is not None
+        assert os.path.isfile(fold.log_file)
 
         seen_val_indices.update(fold.val_indices)
 
@@ -229,18 +248,23 @@ def test_optuna_search_cv_stores_holdout_report_results(
         max_trial_attempts=3,
         n_splits=2,
         report_evaluator=tiny_report_evaluator,
+        logging=True,
     )
 
     result = cv.run(tiny_dataset, index=y, groups=None, holdout_dataset=tiny_dataset)
 
     assert result.report_evaluator is not None
     assert result.holdout_report_results is not None
+    assert result.selected_fold_report_results is not None
     assert result.holdout_report_results["clf/accuracy"] == pytest.approx(1.0)
     assert result.holdout_report_results["clf/n_samples"] == len(tiny_dataset)
 
     payload = result.to_dict()
     assert payload["holdout_report_results"]["clf/accuracy"] == pytest.approx(1.0)
+    assert payload["selected_fold_report_results"]["clf/accuracy"] == [pytest.approx(1.0), pytest.approx(1.0)]
     assert payload["report_evaluator"] is not None
+    assert payload["log_dir"] == result.log_dir
+    assert payload["run_log_file"] == result.run_log_file
 
 
 @pytest.mark.parametrize(

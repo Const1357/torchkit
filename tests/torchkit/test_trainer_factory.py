@@ -107,6 +107,7 @@ def test_trainer_factory_build_sane():
             dataset_evaluator=evaluator,
             batch_evaluator=evaluator,
         ),
+        logging=True,
         config=TrainerConfig(
             device="cpu",
             max_epochs=3,
@@ -123,6 +124,7 @@ def test_trainer_factory_build_sane():
     assert trainer.selector_evaluator is not None
     assert trainer.selector_evaluator.dataset_evaluator is evaluator
     assert trainer.selector_evaluator.batch_evaluator is evaluator
+    assert trainer.logging is True
     assert trainer.config.max_epochs == 3
     assert trainer.config.optimizer_kwargs["lr"] == 0.1
 

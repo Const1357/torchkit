@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from typing import Any, Literal, Optional
 import copy
+import math
+import os
 
 import torch
 from torch import Tensor
@@ -13,6 +15,7 @@ from torchkit.models.Model._model import TorchkitModel
 from torchkit.objectives import Objective, MultitaskObjective
 from torchkit.evaluate.select.bundle import BundleSelectorEvaluator, SelectorEvaluator
 from torchkit.evaluate.select._selector_evaluator import MetricDirection
+from torchkit.train._event_log import JsonlEventLogger, default_log_dir
 
 
 def _move_to_device(x: Any, device: torch.device | str) -> Any:
@@ -92,10 +95,12 @@ class Trainer:
         *,
         selector_evaluator: Optional[BundleSelectorEvaluator] = None,
         config: Optional[TrainerConfig] = None,
+        logging: bool = False,
     ):
         self.model = model
         self.objective = objective
         self.selector_evaluator = selector_evaluator
+        self.logging = bool(logging)
 
         self.config: TrainerConfig = copy.deepcopy(config) if config is not None else TrainerConfig()
 
@@ -124,6 +129,55 @@ class Trainer:
         self._base_config: TrainerConfig = copy.deepcopy(self.config)
 
         self.history: list[dict[str, Any]] = []
+        self.log_dir: Optional[str] = None
+        self.log_file: Optional[str] = None
+        self._event_logger: Optional[JsonlEventLogger] = None
+
+    def _set_event_logger(self, logger: Optional[JsonlEventLogger]) -> None:
+        self._event_logger = logger
+        if logger is not None:
+            self.log_file = logger.path
+            self.log_dir = os.path.dirname(logger.path)
+
+    def _ensure_event_logger(self) -> Optional[JsonlEventLogger]:
+        if self._event_logger is not None:
+            return self._event_logger
+        if not self.logging:
+            return None
+
+        self.log_dir = default_log_dir(prefix="trainer")
+        self.log_file = os.path.join(self.log_dir, "trainer.log.jsonl")
+        self._event_logger = JsonlEventLogger(
+            self.log_file,
+            scope="trainer",
+            echo_console=True,
+        )
+        return self._event_logger
+
+    @staticmethod
+    def _format_metric(value: Any) -> str:
+        if value is None:
+            return "None"
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return str(value)
+        fv = float(value)
+        if not math.isfinite(fv):
+            return str(fv)
+        return f"{fv:.6f}"
+
+    def _current_lr(self) -> float | list[float] | None:
+        if not hasattr(self, "optimizer") or self.optimizer is None:
+            return None
+        lrs = [
+            float(pg.get("lr"))
+            for pg in getattr(self.optimizer, "param_groups", [])
+            if "lr" in pg
+        ]
+        if not lrs:
+            return None
+        if len(lrs) == 1:
+            return lrs[0]
+        return lrs
 
     def get_params(self, deep: bool = True) -> dict[str, Any]:
         d = asdict(self.config)
@@ -700,6 +754,7 @@ class Trainer:
         old_pat = self.config.early_stopping_patience
         old_thr = self.config.early_stopping_threshold
         old_rep = self.config.optuna_report_interval
+        logger = self._ensure_event_logger()
 
         if grad_clip_norm is not None:
             self.config.grad_clip_norm = grad_clip_norm
@@ -740,6 +795,25 @@ class Trainer:
 
             self._fit_called_at_least_once = True
 
+            if logger is not None:
+                logger.emit(
+                    "trainer_fit_start",
+                    payload={
+                        "max_epochs": run_max_epochs,
+                        "has_val_loader": val_loader is not None,
+                        "device": str(device),
+                        "use_amp": self.config.use_amp,
+                        "scheduler_monitor": self.config.scheduler_monitor,
+                        "early_stopping_patience": patience,
+                        "early_stopping_threshold": self.config.early_stopping_threshold,
+                    },
+                    message=(
+                        f"Trainer fit started: max_epochs={run_max_epochs}, "
+                        f"has_val_loader={val_loader is not None}, device={device}. "
+                        f"Logging to {logger.path}."
+                    ),
+                )
+
             for ep in range(1, run_max_epochs + 1):
                 self.state.epoch = ep
 
@@ -749,7 +823,9 @@ class Trainer:
                     self.scheduler.step()
 
                 if val_loader is not None:
+                    prev_best_epoch = self.state.best_epoch
                     val_log = self._validate_one_epoch(val_loader, epoch=ep)
+                    new_best_stored = self.state.best_epoch == ep and self.state.best_epoch != prev_best_epoch
 
                     if self.scheduler is not None and _scheduler_expects_metric(self.scheduler):
                         self.scheduler.step(self._resolve_scheduler_monitor_value(val_log))
@@ -762,12 +838,76 @@ class Trainer:
 
                     if patience is not None:
                         if self.state.epochs_since_improvement >= patience:
+                            if logger is not None:
+                                logger.emit(
+                                    "trainer_early_stop",
+                                    payload={
+                                        "epoch": ep,
+                                        "best_epoch": self.state.best_epoch,
+                                        "best_metric": self.state.best_metric,
+                                        "epochs_since_improvement": self.state.epochs_since_improvement,
+                                    },
+                                    message=(
+                                        f"Early stopping triggered at epoch {ep}. "
+                                        f"Best epoch={self.state.best_epoch}, "
+                                        f"best_metric={self._format_metric(self.state.best_metric)}."
+                                    ),
+                                )
                             break
+
+                    if logger is not None:
+                        metric_key = "val/primary" if "val/primary" in val_log else "val_loss"
+                        selection_score = val_log.get("__selection_score__", None)
+                        msg = (
+                            f"Epoch {ep}/{run_max_epochs}: "
+                            f"train_loss={self._format_metric(train_log.get('train_loss'))}, "
+                            f"{metric_key}={self._format_metric(val_log.get(metric_key))}, "
+                            f"best_metric={self._format_metric(self.state.best_metric)}"
+                        )
+                        if new_best_stored:
+                            msg += ", new best snapshot stored in memory"
+                        logger.emit(
+                            "trainer_epoch_end",
+                            payload={
+                                "epoch": ep,
+                                "max_epochs": run_max_epochs,
+                                "train_log": copy.deepcopy(train_log),
+                                "val_log": copy.deepcopy(val_log),
+                                "best_epoch": self.state.best_epoch,
+                                "best_metric": self.state.best_metric,
+                                "epochs_since_improvement": self.state.epochs_since_improvement,
+                                "selection_score": selection_score,
+                                "lr": self._current_lr(),
+                                "new_best_snapshot_in_memory": new_best_stored,
+                            },
+                            message=msg,
+                        )
 
                 else:
                     if trial is not None and (ep % report_every == 0):
                         score = -float(train_log["train_loss"])
                         self.maybe_report_to_trial(trial, value=float(score), step=ep)
+
+                    if logger is not None:
+                        logger.emit(
+                            "trainer_epoch_end",
+                            payload={
+                                "epoch": ep,
+                                "max_epochs": run_max_epochs,
+                                "train_log": copy.deepcopy(train_log),
+                                "val_log": None,
+                                "best_epoch": self.state.best_epoch,
+                                "best_metric": self.state.best_metric,
+                                "epochs_since_improvement": self.state.epochs_since_improvement,
+                                "selection_score": None,
+                                "lr": self._current_lr(),
+                                "new_best_snapshot_in_memory": False,
+                            },
+                            message=(
+                                f"Epoch {ep}/{run_max_epochs}: "
+                                f"train_loss={self._format_metric(train_log.get('train_loss'))}."
+                            ),
+                        )
 
             self.history.append(
                 {
@@ -782,8 +922,38 @@ class Trainer:
                 sd = {k: v.to(device, non_blocking=True) for k, v in self.state.best_state_dict_cpu.items()}
                 self.model.load_state_dict(sd, strict=True)
 
+            if logger is not None:
+                logger.emit(
+                    "trainer_fit_end",
+                    payload={
+                        "epochs_ran": self.state.epoch,
+                        "best_epoch": self.state.best_epoch,
+                        "best_metric": self.state.best_metric,
+                        "best_snapshot_in_memory": self.state.best_state_dict_cpu is not None,
+                        "final_train_log": copy.deepcopy(self.state.train_logs[-1]) if self.state.train_logs else None,
+                        "final_val_log": copy.deepcopy(self.state.val_logs[-1]) if self.state.val_logs else None,
+                    },
+                    message=(
+                        f"Trainer fit ended after {self.state.epoch} epochs. "
+                        f"Best epoch={self.state.best_epoch}, "
+                        f"best_metric={self._format_metric(self.state.best_metric)}."
+                    ),
+                )
+
             return self
 
+        except Exception as e:
+            if logger is not None:
+                logger.emit(
+                    "trainer_fit_exception",
+                    payload={
+                        "epoch": self.state.epoch if hasattr(self, "state") else None,
+                        "error_type": type(e).__name__,
+                        "error_message": str(e),
+                    },
+                    message=f"Trainer fit failed with {type(e).__name__}: {e}",
+                )
+            raise
         finally:
             self.config.grad_clip_norm = old_grad_clip
             self.config.early_stopping_patience = old_pat
