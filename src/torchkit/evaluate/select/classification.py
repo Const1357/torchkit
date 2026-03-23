@@ -369,21 +369,10 @@ class BinaryPRAUCSelectorEvaluator(_ClassificationSelectorBase):
         probs, targets, _, _, _, _, _, _ = self._classification_tensors(inputs)
         if probs.shape[1] != 2:
             return torch.tensor(0.0, device=probs.device, dtype=probs.dtype)
+        from sklearn.metrics import average_precision_score
 
-        pos_probs = probs[:, 1]
-        thresholds = torch.linspace(0, 1, self.n_points, device=probs.device, dtype=probs.dtype)
-        eps = torch.tensor(1e-12, device=probs.device, dtype=probs.dtype)
-
-        pr_curve_precision = torch.zeros(self.n_points, device=probs.device, dtype=probs.dtype)
-        pr_curve_recall = torch.zeros(self.n_points, device=probs.device, dtype=probs.dtype)
-
-        for i, thr in enumerate(thresholds):
-            pred_pos = pos_probs >= thr
-            tp_t = ((pred_pos) & (targets == 1)).sum().to(probs.dtype)
-            fp_t = ((pred_pos) & (targets == 0)).sum().to(probs.dtype)
-            fn_t = ((~pred_pos) & (targets == 1)).sum().to(probs.dtype)
-
-            pr_curve_precision[i] = tp_t / (tp_t + fp_t + eps)
-            pr_curve_recall[i] = tp_t / (tp_t + fn_t + eps)
-
-        return torch.trapz(pr_curve_precision, pr_curve_recall)
+        value = average_precision_score(
+            targets.detach().cpu().numpy(),
+            probs[:, 1].detach().cpu().numpy(),
+        )
+        return torch.tensor(float(value), device=probs.device, dtype=probs.dtype)

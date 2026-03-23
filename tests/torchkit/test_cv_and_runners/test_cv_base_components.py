@@ -365,6 +365,29 @@ def test_optuna_search_mixin_suggest_parameters_supports_derived_params():
     assert params["trainer/config/max_epochs"] in [10, 20]
 
 
+def test_optuna_search_mixin_supports_categorical_projection_map():
+    study = optuna.create_study(direction="maximize")
+    trial = study.ask()
+
+    params = MinimalOptunaSearchCV.suggest_parameters(
+        trial,
+        ParameterGrid(
+            suggestions={
+                "model/backbone/kwargs/scale_factor": SuggestionSpec(
+                    values=["small", "large"],
+                    suggestion_type="categorical",
+                    projection_map={
+                        "small": 1.0,
+                        "large": 2.0,
+                    },
+                ),
+            }
+        ),
+    )
+
+    assert params["model/backbone/kwargs/scale_factor"] in [1.0, 2.0]
+
+
 def test_results_containers_support_offline_processing_and_reconstruction(
     tiny_dataset,
     tiny_labels_groups,

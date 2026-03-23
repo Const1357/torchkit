@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 from torch import Tensor
 import torch
 
@@ -8,6 +8,18 @@ import torch
 Relational objectives operate between an input and a target."""
 
 from torchkit.objectives._base import Objective
+
+
+def _materialize_optional_tensor_like(
+    value: Any,
+    *,
+    ref: Tensor,
+) -> Optional[Tensor]:
+    if value is None:
+        return None
+    if torch.is_tensor(value):
+        return value.to(device=ref.device, dtype=ref.dtype)
+    return torch.as_tensor(value, device=ref.device, dtype=ref.dtype)
 
 class BCELoss(Objective):
 
@@ -46,13 +58,19 @@ class BCELoss(Objective):
         input_tensor = self.resolve(inputs, self._input_path)
         target_tensor = self.resolve(inputs, self._target_path)
 
+        if input_tensor.ndim == target_tensor.ndim + 1 and input_tensor.shape[1] == 1:
+            target_tensor = target_tensor.unsqueeze(1)
+        target_tensor = target_tensor.to(dtype=input_tensor.dtype)
+        element_weight = _materialize_optional_tensor_like(self._element_weight, ref=input_tensor)
+        pos_weight = _materialize_optional_tensor_like(self._pos_weight, ref=input_tensor)
+
         from torch.nn.functional import binary_cross_entropy_with_logits
 
         return binary_cross_entropy_with_logits(
             input=input_tensor,
             target=target_tensor,
-            weight=self._element_weight,
-            pos_weight=self._pos_weight,
+            weight=element_weight,
+            pos_weight=pos_weight,
             reduction=self.reduction,
         )
 
@@ -63,7 +81,7 @@ class CELoss(Objective):
         input_path: str,
         target_path: str,
         *,
-        class_weight: Optional[Tensor] = None,
+        class_weight: Optional[Any] = None,
         name: str = "cross_entropy_loss",
         weight: float = 1.0,
         reduction: Literal["mean", "sum"] = "mean",
@@ -90,13 +108,14 @@ class CELoss(Objective):
         # resolve the input and target tensors from the inputs dict
         input_tensor = self.resolve(inputs, self._input_path)
         target_tensor = self.resolve(inputs, self._target_path)
+        class_weight = _materialize_optional_tensor_like(self._class_weight, ref=input_tensor)
 
         from torch.nn.functional import cross_entropy
 
         return cross_entropy(
             input=input_tensor,
             target=target_tensor,
-            weight=self._class_weight,
+            weight=class_weight,
             reduction=self.reduction,
         )
     

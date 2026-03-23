@@ -334,6 +334,25 @@ def test_ce_loss_matches_pytorch(ce_inputs: dict[str, object]):
     assert torch.allclose(loss, expected)
 
 
+def test_ce_loss_accepts_python_list_class_weight(ce_inputs: dict[str, object]):
+    obj = CELoss(
+        input_path="clf/logits",
+        target_path="batch/y",
+        class_weight=[1.0, 2.0, 3.0],
+        reduction="mean",
+    )
+
+    loss = obj(inputs=ce_inputs)
+    expected = torch.nn.functional.cross_entropy(
+        ce_inputs["clf"]["logits"],
+        ce_inputs["batch"]["y"],
+        weight=torch.tensor([1.0, 2.0, 3.0], dtype=ce_inputs["clf"]["logits"].dtype),
+        reduction="mean",
+    )
+
+    assert torch.allclose(loss, expected)
+
+
 def test_bce_loss_runs(bce_inputs: dict[str, object]):
     obj = BCELoss(
         input_path="clf/probabilities",
@@ -379,6 +398,25 @@ def test_bce_loss_supports_pos_weight(bce_inputs: dict[str, object]):
         bce_inputs["clf"]["probabilities"],
         bce_inputs["batch"]["target"],
         pos_weight=pos_weight,
+        reduction="mean",
+    )
+
+    assert torch.allclose(loss, expected)
+
+
+def test_bce_loss_accepts_python_list_pos_weight(bce_inputs: dict[str, object]):
+    obj = BCELoss(
+        input_path="clf/probabilities",
+        target_path="batch/target",
+        pos_weight=[2.5],
+        reduction="mean",
+    )
+
+    loss = obj(inputs=bce_inputs)
+    expected = torch.nn.functional.binary_cross_entropy_with_logits(
+        bce_inputs["clf"]["probabilities"],
+        bce_inputs["batch"]["target"],
+        pos_weight=torch.tensor([2.5], dtype=bce_inputs["clf"]["probabilities"].dtype),
         reduction="mean",
     )
 

@@ -37,6 +37,7 @@ class SuggestionSpec:
 
     values: list[Any]
     suggestion_type: SuggestionType
+    projection_map: dict[Any, Any] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.values, list):
@@ -45,6 +46,17 @@ class SuggestionSpec:
             )
         if len(self.values) == 0:
             raise ValueError("SuggestionSpec.values must be non-empty.")
+        if self.projection_map is not None and not isinstance(self.projection_map, dict):
+            raise TypeError(
+                f"SuggestionSpec.projection_map must be a dict or None, got {type(self.projection_map).__name__}."
+            )
+        if self.projection_map is not None:
+            missing = [value for value in self.values if value not in self.projection_map]
+            if missing:
+                raise ValueError(
+                    "SuggestionSpec.projection_map must contain entries for all categorical choices. "
+                    f"Missing: {missing}."
+                )
 
 
 @dataclass(frozen=True)
@@ -158,7 +170,11 @@ class ParameterGrid:
         return cls(suggestions=suggestions)
 
 
-SimpleSuggestionEntry: TypeAlias = SuggestionSpec | tuple[list[Any], SuggestionType]
+SimpleSuggestionEntry: TypeAlias = (
+    SuggestionSpec
+    | tuple[list[Any], SuggestionType]
+    | tuple[list[Any], SuggestionType, dict[Any, Any]]
+)
 ParameterGridLike: TypeAlias = ParameterGrid | dict[str, SimpleSuggestionEntry]
 
 
@@ -174,13 +190,21 @@ def coerce_suggestion_spec(
             f"Suggestion spec for {param_name!r} must be SuggestionSpec or tuple[list[Any], SuggestionType], "
             f"got {type(spec).__name__}."
         )
-    if len(spec) != 2:
+    if len(spec) not in (2, 3):
         raise ValueError(
-            f"Tuple suggestion spec for {param_name!r} must have length 2, got {len(spec)}."
+            f"Tuple suggestion spec for {param_name!r} must have length 2 or 3, got {len(spec)}."
         )
 
-    values, suggestion_type = spec
-    return SuggestionSpec(values=values, suggestion_type=suggestion_type)
+    if len(spec) == 2:
+        values, suggestion_type = spec
+        projection_map = None
+    else:
+        values, suggestion_type, projection_map = spec
+    return SuggestionSpec(
+        values=values,
+        suggestion_type=suggestion_type,
+        projection_map=projection_map,
+    )
 
 
 def coerce_parameter_grid(parameter_grid: ParameterGridLike) -> ParameterGrid:
@@ -220,6 +244,8 @@ class OptunaSearchMixin:
 
             if suggestion_type == "categorical":
                 sampled_value = trial.suggest_categorical(param_name, param_values)
+                if spec.projection_map is not None:
+                    sampled_value = spec.projection_map[sampled_value]
 
             elif suggestion_type == "float":
                 sampled_value = trial.suggest_float(param_name, *param_values)

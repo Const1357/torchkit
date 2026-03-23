@@ -4,6 +4,7 @@ import math
 
 import pytest
 import torch
+from sklearn.metrics import average_precision_score, roc_auc_score
 
 from torchkit.evaluate._evaluator import Evaluator
 from torchkit.evaluate.report import (
@@ -20,6 +21,7 @@ from torchkit.evaluate.report._report_evaluator import ReportEvaluator
 from torchkit.evaluate.select import (
     AccuracySelectorEvaluator,
     BrierScoreSelectorEvaluator,
+    BinaryPRAUCSelectorEvaluator,
     CompositeSelectorEvaluator,
     MaximumNetBenefitSelectorEvaluator,
     MeanSquaredErrorSelectorEvaluator,
@@ -235,6 +237,44 @@ def test_roc_report_and_selector_match_manual(binary_inputs: dict[str, object]) 
     assert metrics["auc"] == pytest.approx(auc)
     assert metrics["youden_j"] == pytest.approx(1.0)
     assert selector_value == pytest.approx(auc)
+
+
+def test_binary_pr_auc_selector_matches_sklearn(binary_inputs: dict[str, object]) -> None:
+    selector = BinaryPRAUCSelectorEvaluator(
+        score_key="clf/logits",
+        target_key="batch/y",
+        probabilities_key="clf/probabilities",
+    )
+
+    selector_value = float(selector(inputs=binary_inputs))
+
+    probs = torch.softmax(binary_inputs["clf"]["probabilities"], dim=1)[:, 1]  # type: ignore[index]
+    targets = binary_inputs["batch"]["y"]  # type: ignore[index]
+    expected = average_precision_score(
+        targets.detach().cpu().numpy(),
+        probs.detach().cpu().numpy(),
+    )
+
+    assert selector_value == pytest.approx(expected)
+
+
+def test_roc_auc_selector_matches_sklearn(binary_inputs: dict[str, object]) -> None:
+    selector = ROCAUCSelectorEvaluator(
+        score_key="clf/logits",
+        target_key="batch/y",
+        probabilities_key="clf/probabilities",
+    )
+
+    selector_value = float(selector(inputs=binary_inputs))
+
+    probs = torch.softmax(binary_inputs["clf"]["probabilities"], dim=1)[:, 1]  # type: ignore[index]
+    targets = binary_inputs["batch"]["y"]  # type: ignore[index]
+    expected = roc_auc_score(
+        targets.detach().cpu().numpy(),
+        probs.detach().cpu().numpy(),
+    )
+
+    assert selector_value == pytest.approx(expected)
 
 
 def test_dca_report_and_selector_match_manual(binary_inputs: dict[str, object]) -> None:

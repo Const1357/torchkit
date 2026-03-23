@@ -116,8 +116,32 @@ class ROCAUCSelectorEvaluator(_ROCBinarySelectorBase):
         )
 
     def primary_metric(self, *, inputs: dict[str, Any]) -> Tensor:
-        tpr, fpr, _ = self._roc_tensors(inputs)
-        return torch.trapz(tpr, fpr)
+        from sklearn.metrics import roc_auc_score
+
+        scores_tensor = self._resolve_score_tensor(inputs)
+        targets = self.resolve(inputs, self.target_key).detach()
+
+        if targets.ndim != 1:
+            raise ValueError(f"targets must be shape (N,), got {tuple(targets.shape)}")
+
+        if self.probabilities_key is not None:
+            probs_tensor = self.resolve(inputs, self.probabilities_key).detach()
+            scores = self._binary_positive_probability(probs_tensor)
+        else:
+            scores = self._binary_positive_probability(scores_tensor)
+
+        if scores.ndim != 1:
+            raise ValueError(f"Resolved positive-class scores must be shape (N,), got {tuple(scores.shape)}")
+        if scores.shape[0] != targets.shape[0]:
+            raise ValueError(
+                f"Scores batch size {scores.shape[0]} does not match targets batch size {targets.shape[0]}"
+            )
+
+        value = roc_auc_score(
+            targets.detach().cpu().numpy(),
+            scores.detach().cpu().numpy(),
+        )
+        return torch.tensor(float(value), device=scores.device, dtype=scores.dtype)
 
 
 class YoudenJSelectorEvaluator(_ROCBinarySelectorBase):

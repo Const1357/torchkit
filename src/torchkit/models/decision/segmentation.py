@@ -16,7 +16,7 @@ class BinarySegmentationThreshold(DecisionModule):
     - (B, *spatial)    : binary probabilities (no channel dim)
 
     Returns:
-    - (B, 1, *spatial) integer predictions in {0, 1}
+    - (B, *spatial) integer predictions in {0, 1}
     """
 
     def __init__(self, threshold: float = 0.5):
@@ -58,7 +58,7 @@ class BinarySegmentationThreshold(DecisionModule):
                 f"{self.__class__.__name__} received invalid shape {tuple(probs.shape)}."
             )
 
-        return (p_pos >= self.threshold).to(dtype=torch.long)
+        return (p_pos >= self.threshold).to(dtype=torch.long).squeeze(1)
 
     def to_spec(self):
         from torchkit.models.decision.factory import DecisionModuleSpec
