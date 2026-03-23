@@ -12,10 +12,22 @@ from sklearn.model_selection import StratifiedKFold as SklearnStratifiedKFold
 from sklearn.model_selection import StratifiedGroupKFold as SklearnStratifiedGroupKFold
 
 from torchkit.data import TorchkitDataset
+from torchkit.data._dataset import DatasetSplit
 
 from torch.utils.data import Subset
 
 # TODO: when needed, extend this file to wrap more sklearn splitters.
+
+def _make_dataset_split(
+    dataset: TorchkitDataset,
+    indices: Any,
+    *,
+    split: DatasetSplit,
+):
+    if isinstance(dataset, TorchkitDataset):
+        return dataset.subset(indices, split=split)
+    return Subset(dataset, indices)
+
 
 def train_test_split(
     dataset: TorchkitDataset,
@@ -33,7 +45,10 @@ def train_test_split(
         stratify=stratify,
     )
 
-    return Subset(dataset, train_idx), Subset(dataset, test_idx)
+    return (
+        _make_dataset_split(dataset, train_idx, split=DatasetSplit.TRAIN),
+        _make_dataset_split(dataset, test_idx, split=DatasetSplit.TEST),
+    )
 
 
 
@@ -76,7 +91,10 @@ class GroupKFold(KFoldSplitter):
 
         dummy_X = np.arange(len(y))
         for train_idx, val_idx in gkf.split(dummy_X, y, groups):
-            yield Subset(dataset, train_idx), Subset(dataset, val_idx)
+            yield (
+                _make_dataset_split(dataset, train_idx, split=DatasetSplit.TRAIN),
+                _make_dataset_split(dataset, val_idx, split=DatasetSplit.VAL),
+            )
 
 class StratifiedKFold(KFoldSplitter):
     """`StratifiedKFold` is a wrapper around `sklearn.StratifiedKFold`."""
@@ -97,7 +115,10 @@ class StratifiedKFold(KFoldSplitter):
 
         dummy_X = np.arange(len(y))
         for train_idx, val_idx in skf.split(dummy_X, y):
-            yield Subset(dataset, train_idx), Subset(dataset, val_idx)
+            yield (
+                _make_dataset_split(dataset, train_idx, split=DatasetSplit.TRAIN),
+                _make_dataset_split(dataset, val_idx, split=DatasetSplit.VAL),
+            )
 
 
 class StratifiedGroupKFold(KFoldSplitter):
@@ -119,4 +140,7 @@ class StratifiedGroupKFold(KFoldSplitter):
 
         dummy_X = np.arange(len(y))
         for train_idx, val_idx in sgkf.split(dummy_X, y, groups):
-            yield Subset(dataset, train_idx), Subset(dataset, val_idx)
+            yield (
+                _make_dataset_split(dataset, train_idx, split=DatasetSplit.TRAIN),
+                _make_dataset_split(dataset, val_idx, split=DatasetSplit.VAL),
+            )

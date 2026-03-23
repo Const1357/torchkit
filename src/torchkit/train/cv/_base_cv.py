@@ -106,9 +106,14 @@ def _module_device(module: nn.Module) -> torch.device:
     return torch.device("cpu")
 
 
-def _resolve_original_indices_for_subset(subset: Subset) -> list[int]:
-    indices = list(subset.indices)
-    base = subset.dataset
+def _resolve_original_indices_for_subset(dataset: TorchkitDataset | Subset) -> list[int]:
+    if isinstance(dataset, TorchkitDataset):
+        return dataset.resolve_original_indices()
+    if isinstance(dataset, Subset):
+        indices = list(dataset.indices)
+        base = dataset.dataset
+    else:
+        return list(range(len(dataset)))
 
     while isinstance(base, Subset):
         parent_indices = list(base.indices)

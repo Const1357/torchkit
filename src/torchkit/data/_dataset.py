@@ -1,15 +1,24 @@
 from __future__ import annotations
 
-from typing import Any, Mapping, final
+from typing import Any, Mapping, Sequence, final
 from abc import ABC, abstractmethod
+from enum import Enum
 
 from torch.utils.data import Dataset
 from torch import Tensor
 
 
+class DatasetSplit(str, Enum):
+    FULL = "full"
+    TRAIN = "train"
+    VAL = "val"
+    TEST = "test"
+    HOLDOUT = "holdout"
+
+
 class TorchkitDataset(Dataset, ABC):
     """
-    Base dataset class with validation.
+    Base dataset class with validation and split-aware dataset hooks.
 
     Subclasses should:
 
@@ -22,6 +31,25 @@ class TorchkitDataset(Dataset, ABC):
         {"x": Tensor}
 
     Other keys (e.g. targets, metadata) are optional.
+
+    Split-aware usage:
+
+    - `subset(indices, split=...)` is the framework hook for creating
+      split-specific dataset views.
+    - `split` is a semantic label describing how the subset will be used,
+      not just which samples it contains.
+    - Typical values are `DatasetSplit.TRAIN`, `DatasetSplit.VAL`,
+      `DatasetSplit.TEST`, and `DatasetSplit.HOLDOUT`.
+    - Datasets can override `subset(...)` to return application-specific
+      child datasets with split-dependent behavior, such as:
+      - online augmentation only for training
+      - deterministic preprocessing for validation / test
+      - split-specific sampling or caching policy
+
+    By default, `subset(...)` returns a generic `DatasetSubsetView`.
+    Datasets that override `subset(...)` should also override
+    `resolve_original_indices()` so CV / logging code can recover sample
+    indices in the original root dataset.
     """
 
     @abstractmethod
@@ -31,6 +59,21 @@ class TorchkitDataset(Dataset, ABC):
     @abstractmethod
     def my_getitem(self, index: int) -> Mapping[str, Any]:
         raise NotImplementedError
+
+    def subset(
+        self,
+        indices: Sequence[int],
+        *,
+        split: DatasetSplit | str = DatasetSplit.FULL,
+    ) -> "TorchkitDataset":
+        return DatasetSubsetView(
+            dataset=self,
+            indices=list(indices),
+            split=DatasetSplit(split),
+        )
+
+    def resolve_original_indices(self) -> list[int]:
+        return list(range(len(self)))
 
     @final
     def __getitem__(self, index: int) -> Mapping[str, Any]:
@@ -57,6 +100,32 @@ class TorchkitDataset(Dataset, ABC):
             )
 
         return item
+
+
+class DatasetSubsetView(TorchkitDataset):
+    def __init__(
+        self,
+        *,
+        dataset: Dataset,
+        indices: Sequence[int],
+        split: DatasetSplit = DatasetSplit.FULL,
+    ) -> None:
+        self.dataset = dataset
+        self.indices = list(indices)
+        self.split = DatasetSplit(split)
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+    def my_getitem(self, index: int) -> Mapping[str, Any]:
+        return self.dataset[self.indices[index]]
+
+    def resolve_original_indices(self) -> list[int]:
+        if isinstance(self.dataset, TorchkitDataset):
+            parent_indices = self.dataset.resolve_original_indices()
+        else:
+            parent_indices = list(range(len(self.dataset)))
+        return [parent_indices[i] for i in self.indices]
     
 # NOTE: Dataset __getitem__ should:
 # 1. always return stable keys

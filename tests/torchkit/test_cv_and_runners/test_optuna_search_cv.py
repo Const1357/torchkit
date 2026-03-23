@@ -8,6 +8,7 @@ import torch
 
 import optuna
 
+from torchkit.data._dataset import DatasetSplit
 from torchkit.data.split import StratifiedKFold, GroupKFold, StratifiedGroupKFold
 from torchkit.evaluate.select import AccuracySelectorEvaluator
 from torchkit.models.Model.factory import TorchkitModelFactory
@@ -265,6 +266,38 @@ def test_optuna_search_cv_stores_holdout_report_results(
     assert payload["report_evaluator"] is not None
     assert payload["log_dir"] == result.log_dir
     assert payload["run_log_file"] == result.run_log_file
+
+
+def test_optuna_search_cv_uses_dataset_split_hooks(
+    tiny_dataset,
+    tiny_labels_groups,
+    tmp_path,
+):
+    y, _groups = tiny_labels_groups
+
+    cv = make_optuna_search_cv(
+        model_spec=make_model_spec(scale_factor=1.0),
+        trainer_spec=make_trainer_spec(
+            evaluator=AccuracySelectorEvaluator(
+                score_key="clf/logits",
+                target_key="batch/y",
+                name="classification",
+            ),
+            max_epochs=2,
+        ),
+        splitter_cls=StratifiedKFold,
+        parameter_grid=ParameterGrid.from_simple({"model/backbone/kwargs/scale_factor": ([1.0], "categorical")}),
+        tmp_path=tmp_path,
+        n_trials=1,
+        max_trial_attempts=3,
+        n_splits=2,
+    )
+
+    cv.run(tiny_dataset, index=y, groups=None)
+
+    seen_splits = {split for split, _ in tiny_dataset.subset_history}
+    assert DatasetSplit.TRAIN in seen_splits
+    assert DatasetSplit.VAL in seen_splits
 
 
 @pytest.mark.parametrize(

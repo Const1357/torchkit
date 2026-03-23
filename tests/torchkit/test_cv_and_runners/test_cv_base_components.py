@@ -9,6 +9,7 @@ import pytest
 import torch
 from torch.utils.data import Subset
 
+from torchkit.data._dataset import DatasetSplit
 from torchkit.data.split import StratifiedKFold
 from torchkit.evaluate.select import AccuracySelectorEvaluator
 from torchkit.models.Model.factory import TorchkitModelFactory
@@ -123,6 +124,14 @@ def test_concat_tensor_dicts_concatenates_per_key():
 def test_resolve_original_indices_for_nested_subset(tiny_dataset):
     s1 = Subset(tiny_dataset, [2, 5, 8, 11])
     s2 = Subset(s1, [1, 3])
+
+    resolved = _resolve_original_indices_for_subset(s2)
+    assert resolved == [5, 11]
+
+
+def test_resolve_original_indices_for_nested_dataset_hook_views(tiny_dataset):
+    s1 = tiny_dataset.subset([2, 5, 8, 11], split=DatasetSplit.TRAIN)
+    s2 = s1.subset([1, 3], split=DatasetSplit.VAL)
 
     resolved = _resolve_original_indices_for_subset(s2)
     assert resolved == [5, 11]

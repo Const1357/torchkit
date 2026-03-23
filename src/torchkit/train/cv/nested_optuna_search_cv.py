@@ -5,9 +5,7 @@ from typing import Any, Optional
 import copy
 import os
 
-from torch.utils.data import Subset
-
-from torchkit.data._dataset import TorchkitDataset
+from torchkit.data._dataset import DatasetSplit, TorchkitDataset
 from torchkit.data.split import KFoldSplitter
 from torchkit.evaluate.report.bundle import BundleReportEvaluator
 from torchkit.train._event_log import JsonlEventLogger
@@ -131,14 +129,10 @@ class NestedOptunaSearchCV(BaseSearchCV):
         for outer_fold, (outer_train_subset, outer_test_subset) in enumerate(
             self._split(self.outer_splitter, dataset, index, groups)
         ):
-            if not isinstance(outer_train_subset, Subset) or not isinstance(outer_test_subset, Subset):
-                raise TypeError(
-                    "KFoldSplitter wrappers are expected to return (Subset, Subset). "
-                    f"Got ({type(outer_train_subset).__name__}, {type(outer_test_subset).__name__})."
-                )
-
             outer_train_indices = _resolve_original_indices_for_subset(outer_train_subset)
             outer_test_indices = _resolve_original_indices_for_subset(outer_test_subset)
+            outer_train_dataset = dataset.subset(outer_train_indices, split=DatasetSplit.TRAIN)
+            outer_test_dataset = dataset.subset(outer_test_indices, split=DatasetSplit.TEST)
             outer_log_file = None
             outer_logger = None
             if self.logging and self.log_dir is not None:
@@ -187,10 +181,10 @@ class NestedOptunaSearchCV(BaseSearchCV):
             )
 
             inner_search_result = inner_search.run(
-                outer_train_subset,
+                outer_train_dataset,
                 index=index,
                 groups=groups,
-                holdout_dataset=outer_test_subset,
+                holdout_dataset=outer_test_dataset,
             )
 
             outer_results.append(

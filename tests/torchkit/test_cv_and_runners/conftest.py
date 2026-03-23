@@ -6,7 +6,7 @@ import torch
 import pytest
 from torch import Tensor, nn
 
-from torchkit.data._dataset import TorchkitDataset
+from torchkit.data._dataset import DatasetSplit, TorchkitDataset
 from torchkit.data.split import StratifiedKFold, GroupKFold, StratifiedGroupKFold
 
 from torchkit.models.backbone._backbone import Backbone
@@ -102,25 +102,55 @@ class TinyClassificationDataset(TorchkitDataset):
       - GroupKFold
       - StratifiedGroupKFold
     """
-    def __init__(self):
-        self._xs: list[Tensor] = []
-        self._ys: list[int] = []
+    def __init__(
+        self,
+        *,
+        xs: Optional[list[Tensor]] = None,
+        ys: Optional[list[int]] = None,
+        indices: Optional[list[int]] = None,
+        split: DatasetSplit = DatasetSplit.FULL,
+        subset_history: Optional[list[tuple[DatasetSplit, list[int]]]] = None,
+    ):
+        if xs is None or ys is None:
+            xs = []
+            ys = []
+            for _group in range(8):
+                xs.append(torch.tensor([2.0, 0.0, 0.0], dtype=torch.float32))
+                ys.append(0)
 
-        for _group in range(8):
-            self._xs.append(torch.tensor([2.0, 0.0, 0.0], dtype=torch.float32))
-            self._ys.append(0)
+                xs.append(torch.tensor([0.0, 2.0, 0.0], dtype=torch.float32))
+                ys.append(1)
 
-            self._xs.append(torch.tensor([0.0, 2.0, 0.0], dtype=torch.float32))
-            self._ys.append(1)
+        self._xs = xs
+        self._ys = ys
+        self._indices = list(range(len(self._xs))) if indices is None else list(indices)
+        self.split = DatasetSplit(split)
+        self.subset_history = subset_history if subset_history is not None else []
 
     def __len__(self) -> int:
-        return len(self._xs)
+        return len(self._indices)
 
     def my_getitem(self, index) -> dict[str, Any]:
+        source_index = self._indices[index]
         return {
-            "x": self._xs[index].clone(),
-            "y": torch.tensor(self._ys[index], dtype=torch.long),
+            "x": self._xs[source_index].clone(),
+            "y": torch.tensor(self._ys[source_index], dtype=torch.long),
         }
+
+    def subset(self, indices, *, split=DatasetSplit.FULL):
+        split = DatasetSplit(split)
+        resolved_indices = [self._indices[i] for i in indices]
+        self.subset_history.append((split, list(resolved_indices)))
+        return TinyClassificationDataset(
+            xs=self._xs,
+            ys=self._ys,
+            indices=resolved_indices,
+            split=split,
+            subset_history=self.subset_history,
+        )
+
+    def resolve_original_indices(self) -> list[int]:
+        return list(self._indices)
 
 
 class ErrorRateEvaluator(SelectorEvaluator):

@@ -10,7 +10,6 @@ import traceback
 import optuna
 from optuna.trial import TrialState
 import torch
-from torch.utils.data import Subset
 
 from torchkit.data._dataset import TorchkitDataset
 from torchkit.evaluate.report.bundle import BundleReportEvaluator
@@ -93,7 +92,7 @@ class OptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
         self,
         *,
         trial: optuna.Trial,
-        search_dataset: TorchkitDataset | Subset,
+        search_dataset: TorchkitDataset,
         search_index: Any,
         search_groups: Any,
         search_original_indices: list[int],
@@ -128,12 +127,6 @@ class OptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
         for fold, (train_subset, val_subset) in enumerate(
             self._split(self.splitter, search_dataset, search_index, search_groups)
         ):
-            if not isinstance(train_subset, Subset) or not isinstance(val_subset, Subset):
-                raise TypeError(
-                    "KFoldSplitter wrappers are expected to return (Subset, Subset). "
-                    f"Got ({type(train_subset).__name__}, {type(val_subset).__name__})."
-                )
-
             train_original_indices = _resolve_original_indices_for_subset(train_subset)
             val_original_indices = _resolve_original_indices_for_subset(val_subset)
 
@@ -272,16 +265,13 @@ class OptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
 
     def run(
         self,
-        dataset: TorchkitDataset | Subset,
+        dataset: TorchkitDataset,
         index: Any = None,
         groups: Optional[Any] = None,
         *,
-        holdout_dataset: Optional[TorchkitDataset | Subset] = None,
+        holdout_dataset: Optional[TorchkitDataset] = None,
     ) -> OptunaSearchCVResult:
-        if isinstance(dataset, Subset):
-            search_original_indices = _resolve_original_indices_for_subset(dataset)
-        else:
-            search_original_indices = list(range(len(dataset)))
+        search_original_indices = _resolve_original_indices_for_subset(dataset)
 
         search_index = _safe_take(index, search_original_indices) if index is not None else None
         search_groups = _safe_take(groups, search_original_indices) if groups is not None else None
