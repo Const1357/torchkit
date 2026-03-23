@@ -16,7 +16,8 @@ class BCELoss(Objective):
         input_path: str,
         target_path: str,
         *,
-        class_weight: Optional[Tensor] = None,
+        element_weight: Optional[Tensor] = None,
+        pos_weight: Optional[Tensor] = None,
         name: str = "binary_cross_entropy_loss",
         weight: float = 1.0,
         reduction: Literal["mean", "sum"] = "mean",
@@ -31,7 +32,8 @@ class BCELoss(Objective):
 
         self._input_path = input_path
         self._target_path = f"{target_path}"
-        self._class_weight = class_weight
+        self._element_weight = element_weight
+        self._pos_weight = pos_weight
 
         self._required_keys = (input_path, target_path)
 
@@ -49,7 +51,8 @@ class BCELoss(Objective):
         return binary_cross_entropy_with_logits(
             input=input_tensor,
             target=target_tensor,
-            weight=self._class_weight,
+            weight=self._element_weight,
+            pos_weight=self._pos_weight,
             reduction=self.reduction,
         )
 

@@ -365,6 +365,26 @@ def test_bce_loss_matches_pytorch(bce_inputs: dict[str, object]):
     assert torch.allclose(loss, expected)
 
 
+def test_bce_loss_supports_pos_weight(bce_inputs: dict[str, object]):
+    pos_weight = torch.tensor([2.5], dtype=torch.float32)
+    obj = BCELoss(
+        input_path="clf/probabilities",
+        target_path="batch/target",
+        pos_weight=pos_weight,
+        reduction="mean",
+    )
+
+    loss = obj(inputs=bce_inputs)
+    expected = torch.nn.functional.binary_cross_entropy_with_logits(
+        bce_inputs["clf"]["probabilities"],
+        bce_inputs["batch"]["target"],
+        pos_weight=pos_weight,
+        reduction="mean",
+    )
+
+    assert torch.allclose(loss, expected)
+
+
 def test_mse_loss_runs(mse_inputs: dict[str, object]):
     obj = MSELoss(
         input_path="reg/predictions",
