@@ -246,36 +246,38 @@ class InMemoryOptunaSearchCV(OptunaSearchCV):
 
         return trial_result
 
-    def _run_single_trial(
+    def _run_single_trial_with_params(
         self,
         *,
-        trial: optuna.Trial,
+        trial_number: int,
+        params: dict[str, Any],
         search_dataset: TorchkitDataset,
         search_index: Any,
         search_groups: Any,
         search_original_indices: list[int],
+        trial: optuna.Trial | None = None,
     ) -> OptunaTrialResult:
         del search_original_indices
 
-        params = self.suggest_parameters(trial, self.parameter_grid)
         trial_logger = None
         trial_log_file = None
-        if self.logging and self.log_dir is not None:
-            trial_log_file = os.path.join(self.log_dir, "trials", f"trial_{trial.number:03d}.log.jsonl")
+        strategy = self._distributed_strategy()
+        if self.logging and self.log_dir is not None and self._is_main_process():
+            trial_log_file = os.path.join(self.log_dir, "trials", f"trial_{trial_number:03d}.log.jsonl")
             trial_logger = JsonlEventLogger(
                 trial_log_file,
                 scope="optuna_trial",
                 echo_console=True,
-                context={"trial_number": trial.number},
+                context={"trial_number": trial_number},
             )
             trial_logger.emit(
                 "cv_trial_start",
-                payload={"trial_number": trial.number, "params": copy.deepcopy(params)},
-                message=f"Trial {trial.number} started. Logging to {trial_log_file}.",
+                payload={"trial_number": trial_number, "params": copy.deepcopy(params)},
+                message=f"Trial {trial_number} started. Logging to {trial_log_file}.",
             )
 
         live_folds = self._build_live_folds(
-            trial=trial,
+            trial=type("_TrialView", (), {"number": trial_number})(),
             params=params,
             search_dataset=search_dataset,
             search_index=search_index,
@@ -340,16 +342,21 @@ class InMemoryOptunaSearchCV(OptunaSearchCV):
                     "cv_trial_epoch_report",
                     payload=copy.deepcopy(report),
                     message=(
-                        f"Trial {trial.number} sync epoch {sync_epoch}: "
+                        f"Trial {trial_number} sync epoch {sync_epoch}: "
                         f"aggregate_selection_score={aggregate_selection_score:.6f}."
                     ),
                 )
 
-            trial.report(aggregate_selection_score, sync_epoch)
-            if trial.should_prune():
+            should_prune = False
+            if trial is not None and self._is_main_process():
+                trial.report(aggregate_selection_score, sync_epoch)
+                should_prune = bool(trial.should_prune())
+            if strategy is not None:
+                should_prune = bool(strategy.broadcast_object(should_prune, src=0))
+            if should_prune:
                 raise _PrunedTrialWithResult(
                     self._collect_trial_result(
-                        trial=trial,
+                        trial=type("_TrialView", (), {"number": trial_number})(),
                         params=params,
                         live_folds=live_folds,
                         intermediate_reports=intermediate_reports,
@@ -363,11 +370,31 @@ class InMemoryOptunaSearchCV(OptunaSearchCV):
                 )
 
         return self._collect_trial_result(
-            trial=trial,
+            trial=type("_TrialView", (), {"number": trial_number})(),
             params=params,
             live_folds=live_folds,
             intermediate_reports=intermediate_reports,
             status="SUCCESS",
             trial_log_file=trial_log_file,
             trial_logger=trial_logger,
+        )
+
+    def _run_single_trial(
+        self,
+        *,
+        trial: optuna.Trial,
+        search_dataset: TorchkitDataset,
+        search_index: Any,
+        search_groups: Any,
+        search_original_indices: list[int],
+    ) -> OptunaTrialResult:
+        params = self.suggest_parameters(trial, self.parameter_grid)
+        return self._run_single_trial_with_params(
+            trial_number=trial.number,
+            params=params,
+            search_dataset=search_dataset,
+            search_index=search_index,
+            search_groups=search_groups,
+            search_original_indices=search_original_indices,
+            trial=trial,
         )

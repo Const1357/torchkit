@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Optional
+import copy
 
 import torch
 import torch.distributed as dist
@@ -20,6 +21,15 @@ class DDPStrategy:
 
     def __post_init__(self) -> None:
         self._owns_process_group = False
+
+    def __deepcopy__(self, memo):
+        copied = type(self)(
+            config=copy.deepcopy(self.config, memo),
+            context=copy.deepcopy(self.context, memo),
+            process_group=None,
+        )
+        copied._owns_process_group = False
+        return copied
 
     @property
     def is_enabled(self) -> bool:

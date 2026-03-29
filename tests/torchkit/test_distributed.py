@@ -11,9 +11,14 @@ import torch.multiprocessing as mp
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
+from torchkit.data.split import StratifiedKFold
 from torchkit.distributed import DDPStrategy, DistributedConfig, DistributedContext
+from torchkit.evaluate.select import AccuracySelectorEvaluator
 from torchkit.evaluate.select.bundle import BundleSelectorEvaluator
 from torchkit.objectives.relational import CELoss
+from torchkit.train.cv._optuna_search_mixin import ParameterGrid
+from torchkit.train.cv.in_memory_nested_optuna_search_cv import InMemoryNestedOptunaSearchCV
+from torchkit.train.cv.in_memory_optuna_search_cv import InMemoryOptunaSearchCV
 from torchkit.train.trainer import Trainer, TrainerConfig
 
 from .test_trainer import (
@@ -22,6 +27,12 @@ from .test_trainer import (
     DictClassificationDataset,
     DummyTrial,
     make_classification_model,
+)
+from .test_cv_and_runners.conftest import (
+    TinyClassificationDataset,
+    make_labels_and_groups,
+    make_model_spec,
+    make_trainer_spec,
 )
 
 
@@ -160,10 +171,210 @@ def _ddp_prune_worker(rank: int, world_size: int, init_method: str, output_dir: 
         strategy.finalize()
 
 
+class _CountingStudyInMemoryOptunaSearchCV(InMemoryOptunaSearchCV):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.create_study_calls = 0
+
+    def _create_study(self):
+        self.create_study_calls += 1
+        return super()._create_study()
+
+
+class _CountingStudyInMemoryNestedOptunaSearchCV(InMemoryNestedOptunaSearchCV):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._inner_searches: list[_CountingStudyInMemoryOptunaSearchCV] = []
+
+    @property
+    def create_study_calls(self) -> int:
+        return sum(inner.create_study_calls for inner in self._inner_searches)
+
+    def _build_inner_search(self, *, outer_fold: int) -> _CountingStudyInMemoryOptunaSearchCV:
+        inner = _CountingStudyInMemoryOptunaSearchCV(
+            model_spec=make_model_spec(scale_factor=1.0),
+            trainer_spec=self.trainer_spec,
+            parameter_grid=self.parameter_grid,
+            splitter_cls=self.inner_splitter_cls,
+            dataloader_factory=self.dataloader_factory,
+            n_trials=self.n_trials,
+            max_trial_attempts=self.max_trial_attempts,
+            n_splits=self.k_inner if self.k_inner is not None else 0,
+            shuffle=self.shuffle_inner,
+            random_state=self.random_state,
+            calibrate=self.calibrate,
+            report_evaluator=self.report_evaluator,
+            logging=self.logging,
+            _log_root_dir=None,
+            final_model_dir=self._outer_fold_model_dir(outer_fold),
+            keep_final_model_state_dict_cpu=self.keep_final_model_state_dict_cpu,
+        )
+        self._inner_searches.append(inner)
+        return inner
+
+
+def _distributed_search_worker(rank: int, world_size: int, init_method: str, output_dir: str) -> None:
+    _configure_rank_env(rank=rank, world_size=world_size)
+    strategy = DDPStrategy(
+        config=DistributedConfig(
+            enabled=True,
+            backend="gloo",
+            init_method=init_method,
+        ),
+        context=DistributedContext.from_env(),
+    )
+
+    trainer_spec = make_trainer_spec(
+        evaluator=AccuracySelectorEvaluator(
+            score_key="clf/logits",
+            target_key="batch/y",
+            name="classification",
+        ),
+        max_epochs=1,
+    )
+    trainer_spec.config.device = "cpu"
+    trainer_spec.config.validate_every = 1
+    trainer_spec.distributed_strategy = strategy
+
+    def dataloader_factory(ds, shuffle):
+        sampler = DistributedSampler(
+            ds,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=shuffle,
+            drop_last=False,
+        )
+        return DataLoader(ds, batch_size=2, sampler=sampler, shuffle=False)
+
+    cv = _CountingStudyInMemoryOptunaSearchCV(
+        model_spec=make_model_spec(scale_factor=1.0),
+        trainer_spec=trainer_spec,
+        parameter_grid=ParameterGrid.from_simple(
+            {"model/backbone/kwargs/scale_factor": ([1.0], "categorical")}
+        ),
+        splitter_cls=StratifiedKFold,
+        dataloader_factory=dataloader_factory,
+        n_trials=1,
+        max_trial_attempts=1,
+        n_splits=2,
+        logging=False,
+        final_model_dir=output_dir,
+    )
+
+    dataset = TinyClassificationDataset()
+    labels, _groups = make_labels_and_groups()
+    payload: dict[str, object]
+    try:
+        result = cv.run(dataset, index=labels, groups=None)
+        payload = {
+            "ok": True,
+            "rank": rank,
+            "create_study_calls": cv.create_study_calls,
+            "attempted_trials": result.attempted_trials,
+            "successful_trials": result.successful_trials,
+            "trial_numbers": [trial_result.trial_number for trial_result in result.trial_results],
+            "trial_statuses": [trial_result.status for trial_result in result.trial_results],
+            "best_trial_number": result.best_trial_number,
+        }
+    except Exception as exc:
+        import traceback
+
+        payload = {
+            "ok": False,
+            "rank": rank,
+            "create_study_calls": cv.create_study_calls,
+            "error": repr(exc),
+            "traceback": traceback.format_exc(),
+        }
+    finally:
+        torch.save(payload, Path(output_dir) / f"search_rank_{rank}.pt")
+        strategy.finalize()
+
+
+def _distributed_nested_search_worker(rank: int, world_size: int, init_method: str, output_dir: str) -> None:
+    _configure_rank_env(rank=rank, world_size=world_size)
+    strategy = DDPStrategy(
+        config=DistributedConfig(
+            enabled=True,
+            backend="gloo",
+            init_method=init_method,
+        ),
+        context=DistributedContext.from_env(),
+    )
+
+    trainer_spec = make_trainer_spec(
+        evaluator=AccuracySelectorEvaluator(
+            score_key="clf/logits",
+            target_key="batch/y",
+            name="classification",
+        ),
+        max_epochs=1,
+    )
+    trainer_spec.config.device = "cpu"
+    trainer_spec.config.validate_every = 1
+    trainer_spec.distributed_strategy = strategy
+
+    def dataloader_factory(ds, shuffle):
+        sampler = DistributedSampler(
+            ds,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=shuffle,
+            drop_last=False,
+        )
+        return DataLoader(ds, batch_size=2, sampler=sampler, shuffle=False)
+
+    cv = _CountingStudyInMemoryNestedOptunaSearchCV(
+        model_spec=make_model_spec(scale_factor=1.0),
+        trainer_spec=trainer_spec,
+        parameter_grid=ParameterGrid.from_simple(
+            {"model/backbone/kwargs/scale_factor": ([1.0], "categorical")}
+        ),
+        outer_splitter_cls=StratifiedKFold,
+        inner_splitter_cls=StratifiedKFold,
+        dataloader_factory=dataloader_factory,
+        n_trials=1,
+        max_trial_attempts=1,
+        k_outer=2,
+        k_inner=2,
+        logging=False,
+        final_model_dir=output_dir,
+    )
+
+    dataset = TinyClassificationDataset()
+    labels, _groups = make_labels_and_groups()
+    payload: dict[str, object]
+    try:
+        result = cv.run(dataset, index=labels, groups=None)
+        payload = {
+            "ok": True,
+            "rank": rank,
+            "create_study_calls": cv.create_study_calls,
+            "n_outer_results": len(result.outer_results),
+            "outer_best_trial_numbers": [outer.best_trial_number for outer in result.outer_results],
+            "outer_best_metrics": [outer.best_metric for outer in result.outer_results],
+            "outer_best_selection_scores": [outer.best_selection_score for outer in result.outer_results],
+        }
+    except Exception as exc:
+        import traceback
+
+        payload = {
+            "ok": False,
+            "rank": rank,
+            "create_study_calls": cv.create_study_calls,
+            "error": repr(exc),
+            "traceback": traceback.format_exc(),
+        }
+    finally:
+        torch.save(payload, Path(output_dir) / f"nested_search_rank_{rank}.pt")
+        strategy.finalize()
+
+
 def _spawn_and_collect(
     worker,
     *,
     world_size: int = 2,
+    file_prefix: str = "rank_",
 ) -> list[dict[str, object]]:
     with tempfile.TemporaryDirectory() as tmpdir:
         init_method = f"file://{Path(tmpdir) / 'ddp_init'}"
@@ -174,7 +385,7 @@ def _spawn_and_collect(
             join=True,
         )
         return [
-            torch.load(Path(tmpdir) / f"rank_{rank}.pt", map_location="cpu", weights_only=False)
+            torch.load(Path(tmpdir) / f"{file_prefix}{rank}.pt", map_location="cpu", weights_only=False)
             for rank in range(world_size)
         ]
 
@@ -211,3 +422,45 @@ def test_distributed_trainer_broadcasts_pruning_from_main_rank() -> None:
     assert isinstance(report_value, float)
     assert report_step == 1
     assert results[1]["reports"] == []
+
+
+@pytest.mark.skipif(not torch.distributed.is_available(), reason="torch.distributed is unavailable")
+def test_distributed_in_memory_optuna_search_creates_study_only_on_main_rank() -> None:
+    results = _spawn_and_collect(_distributed_search_worker, file_prefix="search_rank_")
+
+    assert len(results) == 2
+    rank0, rank1 = results
+    assert rank0["ok"], rank0.get("traceback")
+    assert rank1["ok"], rank1.get("traceback")
+    assert rank0["create_study_calls"] == 1
+    assert rank1["create_study_calls"] == 0
+    assert rank0["attempted_trials"] == 1
+    assert rank1["attempted_trials"] == 1
+    assert rank0["successful_trials"] == 1
+    assert rank1["successful_trials"] == 1
+    assert rank0["trial_numbers"] == [0]
+    assert rank1["trial_numbers"] == [0]
+    assert rank0["trial_statuses"] == ["SUCCESS"]
+    assert rank1["trial_statuses"] == ["SUCCESS"]
+    assert rank0["best_trial_number"] == 0
+    assert rank1["best_trial_number"] == 0
+
+
+@pytest.mark.skipif(not torch.distributed.is_available(), reason="torch.distributed is unavailable")
+def test_distributed_in_memory_nested_optuna_search_uses_main_rank_studies_and_agrees_across_ranks() -> None:
+    results = _spawn_and_collect(_distributed_nested_search_worker, file_prefix="nested_search_rank_")
+
+    assert len(results) == 2
+    rank0, rank1 = results
+    assert rank0["ok"], rank0.get("traceback")
+    assert rank1["ok"], rank1.get("traceback")
+    assert rank0["create_study_calls"] == 2
+    assert rank1["create_study_calls"] == 0
+    assert rank0["n_outer_results"] == 2
+    assert rank1["n_outer_results"] == 2
+    assert rank0["outer_best_trial_numbers"] == [0, 0]
+    assert rank1["outer_best_trial_numbers"] == [0, 0]
+    assert rank0["outer_best_metrics"] == pytest.approx([1.0, 1.0])
+    assert rank1["outer_best_metrics"] == pytest.approx([1.0, 1.0])
+    assert rank0["outer_best_selection_scores"] == pytest.approx([1.0, 1.0])
+    assert rank1["outer_best_selection_scores"] == pytest.approx([1.0, 1.0])

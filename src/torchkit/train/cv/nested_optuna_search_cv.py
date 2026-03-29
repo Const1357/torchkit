@@ -113,6 +113,12 @@ class NestedOptunaSearchCV(BaseSearchCV):
             keep_final_model_state_dict_cpu=self.keep_final_model_state_dict_cpu,
         )
 
+    def _is_main_process(self) -> bool:
+        strategy = getattr(self.trainer_spec, "distributed_strategy", None)
+        if strategy is None or not strategy.is_enabled:
+            return True
+        return strategy.is_main_process
+
     def run(
         self,
         dataset: TorchkitDataset,
@@ -122,7 +128,7 @@ class NestedOptunaSearchCV(BaseSearchCV):
         outer_results: list[OuterFoldResult] = []
         run_logger = None
         run_log_file = None
-        if self.logging and self.log_dir is not None:
+        if self.logging and self.log_dir is not None and self._is_main_process():
             run_log_file = os.path.join(self.log_dir, "nested_search.log.jsonl")
             run_logger = JsonlEventLogger(
                 run_log_file,
@@ -159,7 +165,7 @@ class NestedOptunaSearchCV(BaseSearchCV):
             outer_test_dataset = dataset.subset(outer_test_indices, split=DatasetSplit.TEST)
             outer_log_file = None
             outer_logger = None
-            if self.logging and self.log_dir is not None:
+            if self.logging and self.log_dir is not None and self._is_main_process():
                 outer_log_file = os.path.join(self.log_dir, "outer_folds", f"outer_fold_{outer_fold:03d}.log.jsonl")
                 outer_logger = JsonlEventLogger(
                     outer_log_file,
