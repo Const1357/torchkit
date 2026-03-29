@@ -38,12 +38,6 @@ class Objective(nn.Module, ABC):
         is_optional: bool = False,
     ):
         
-        if not isinstance(name, str):
-            raise TypeError(f"Objective `name` must be a string, got {type(name).__name__}.")
-        if not name:
-            raise ValueError(f"Objective `name` must be a non-empty string, got {name}.")
-        if weight < 0.0:
-            raise ValueError(f"Objective `weight` must be non-negative, got {weight}.")
         if reduction not in ("mean", "sum"):
             raise ValueError(f"Objective `reduction` must be one of 'mean', 'sum', got {reduction}.")
         if not isinstance(is_optional, bool):
@@ -52,20 +46,42 @@ class Objective(nn.Module, ABC):
         super().__init__()
 
         # bookkeeping
-        self._name = str(name)
-        self._weight = float(weight)
+        self._name = self._validate_name(name)
+        self._weight = self._validate_weight(weight)
         self._reduction = reduction
         self._is_optional = bool(is_optional)
+
+    @staticmethod
+    def _validate_name(name: str) -> str:
+        if not isinstance(name, str):
+            raise TypeError(f"Objective `name` must be a string, got {type(name).__name__}.")
+        if not name:
+            raise ValueError(f"Objective `name` must be a non-empty string, got {name}.")
+        return str(name)
+
+    @staticmethod
+    def _validate_weight(weight: float) -> float:
+        if weight < 0.0:
+            raise ValueError(f"Objective `weight` must be non-negative, got {weight}.")
+        return float(weight)
 
     @property
     def name(self) -> str:
         """The name of the objective."""
         return self._name
 
+    @name.setter
+    def name(self, value: str) -> None:
+        self._name = self._validate_name(value)
+
     @property
     def weight(self) -> float:
         """The weight of the objective."""
         return self._weight
+
+    @weight.setter
+    def weight(self, value: float) -> None:
+        self._weight = self._validate_weight(value)
 
     @property
     def is_optional(self) -> bool:

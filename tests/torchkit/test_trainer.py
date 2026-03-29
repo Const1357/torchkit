@@ -723,7 +723,7 @@ def test_train_one_epoch_logs_multitask_component_losses(
         weight=0.5,
         name="aux_ce",
     )
-    objective = MultitaskObjective(ce1, ce2, name="multi")
+    objective = MultitaskObjective({"main": ce1, "aux": ce2}, name="multi")
 
     trainer = Trainer(
         model=model,
@@ -739,7 +739,8 @@ def test_train_one_epoch_logs_multitask_component_losses(
     log = trainer._train_one_epoch(train_loader, epoch=1)
 
     assert "train_loss" in log
-    assert any(k.startswith("train_loss/") for k in log.keys())
+    assert log["train_loss/main"] >= 0.0
+    assert log["train_loss/aux"] >= 0.0
 
 
 def test_dataset_evaluator_drives_best_metric_selection(

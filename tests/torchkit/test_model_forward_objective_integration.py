@@ -268,8 +268,10 @@ def test_model_forward_outputs_work_with_multitask_objective(
     )
 
     objective = MultitaskObjective(
-        ce,
-        mse,
+        {
+            "clf": ce,
+            "reg": mse,
+        },
         name="multi",
     )
 
@@ -278,8 +280,8 @@ def test_model_forward_outputs_work_with_multitask_objective(
     assert isinstance(loss, Tensor)
     assert loss.ndim == 0
     assert torch.isfinite(loss)
-    assert "cross_entropy_loss" in objective.per_objective_loss
-    assert "mean_squared_error_loss" in objective.per_objective_loss
+    assert "clf" in objective.per_objective_loss
+    assert "reg" in objective.per_objective_loss
 
 
 def test_ce_objective_loss_matches_manual_forward_application(
@@ -345,16 +347,18 @@ def test_loss_from_model_forward_supports_backward(
     }
 
     objective = MultitaskObjective(
-        CELoss(
-            input_path="clf/logits",
-            target_path="batch/y",
-            reduction="mean",
-        ),
-        MSELoss(
-            input_path="reg/predictions",
-            target_path="batch/target",
-            reduction="mean",
-        ),
+        {
+            "clf": CELoss(
+                input_path="clf/logits",
+                target_path="batch/y",
+                reduction="mean",
+            ),
+            "reg": MSELoss(
+                input_path="reg/predictions",
+                target_path="batch/target",
+                reduction="mean",
+            ),
+        },
         name="multi",
     )
 
@@ -394,8 +398,10 @@ def test_optional_objective_can_zero_out_on_missing_branch(
     )
 
     objective = MultitaskObjective(
-        optional_ce,
-        required_mse,
+        {
+            "clf": optional_ce,
+            "reg": required_mse,
+        },
         name="multi_optional",
     )
 

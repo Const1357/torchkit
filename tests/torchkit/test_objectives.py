@@ -470,12 +470,12 @@ def test_relational_required_keys_preserve_user_paths():
 
 def test_multitask_requires_at_least_one_objective():
     with pytest.raises(ValueError, match="At least one objective must be provided"):
-        MultitaskObjective(name="multi")
+        MultitaskObjective({}, name="multi")
 
 
 def test_multitask_rejects_non_objective():
     with pytest.raises(TypeError, match="All objectives must derive from Objective"):
-        MultitaskObjective("bad", name="multi")  # type: ignore[arg-type]
+        MultitaskObjective({"bad": "bad"}, name="multi")  # type: ignore[arg-type]
 
 
 def test_multitask_rejects_mismatched_reduction():
@@ -483,7 +483,7 @@ def test_multitask_rejects_mismatched_reduction():
     obj2 = MSELoss("reg/predictions", "batch/target", reduction="sum")
 
     with pytest.raises(ValueError, match="same reduction"):
-        MultitaskObjective(obj1, obj2, name="multi")
+        MultitaskObjective({"obj1": obj1, "obj2": obj2}, name="multi")
 
 
 def test_multitask_sums_weighted_losses(ce_inputs: dict[str, object], mse_inputs: dict[str, object]):
@@ -499,21 +499,25 @@ def test_multitask_sums_weighted_losses(ce_inputs: dict[str, object], mse_inputs
     ce = CELoss("clf/logits", "batch/y", weight=2.0)
     mse = MSELoss("reg/predictions", "batch/target", weight=0.5)
 
-    multi = MultitaskObjective(ce, mse, name="multi")
+    multi = MultitaskObjective({"clf": ce, "reg": mse}, name="multi")
     loss = multi(inputs=inputs)
 
     expected = 2.0 * ce(inputs=inputs) + 0.5 * mse(inputs=inputs)
     assert torch.allclose(loss, expected)
 
-    assert "cross_entropy_loss" in multi.per_objective_loss
-    assert "mean_squared_error_loss" in multi.per_objective_loss
+    assert ce.name == "cross_entropy_loss"
+    assert mse.name == "mean_squared_error_loss"
+    assert multi.objectives["clf"].name == "clf"
+    assert multi.objectives["reg"].name == "reg"
+    assert "clf" in multi.per_objective_loss
+    assert "reg" in multi.per_objective_loss
 
 
 def test_multitask_forward_allows_optional_objectives_to_zero_out(mse_inputs: dict[str, object]):
     required = MSELoss("reg/predictions", "batch/target", is_optional=False)
     optional = CELoss("clf/logits", "batch/y", is_optional=True)
 
-    multi = MultitaskObjective(required, optional, name="multi")
+    multi = MultitaskObjective({"reg": required, "clf": optional}, name="multi")
 
     loss = multi(inputs=mse_inputs)
 

@@ -29,6 +29,8 @@ from torchkit.train.cv._optuna_results import (
     OuterFoldResult,
     NestedOptunaSearchCVResult,
 )
+from torchkit.objectives import MultitaskObjective
+from torchkit.objectives.relational import CELoss, MSELoss
 from torchkit.train.cv._optuna_search_mixin import (
     DerivedParam,
     OptunaSearchMixin,
@@ -233,6 +235,51 @@ def test_base_search_cv_routes_parameters_into_real_specs(tmp_path):
     assert built_model_spec.backbone.kwargs["scale_factor"] == -1.0
     assert built_trainer_spec.config.max_epochs == 7
     assert trainer.config.max_epochs == 7
+
+
+def test_base_search_cv_routes_parameters_into_named_multitask_objectives(tmp_path):
+    model_spec = make_model_spec()
+    trainer_spec = make_trainer_spec(
+        evaluator=AccuracySelectorEvaluator(
+            score_key="clf/logits",
+            target_key="batch/y",
+            name="classification",
+        ),
+        max_epochs=2,
+    )
+    trainer_spec.objective = MultitaskObjective(
+        {
+            "clf": CELoss("clf/logits", "batch/y", weight=1.0),
+            "reg": MSELoss("reg/predictions", "batch/target", weight=0.5),
+        },
+        name="multi",
+    )
+
+    cv = MinimalBaseSearchCV(
+        model_spec=model_spec,
+        trainer_spec=trainer_spec,
+        parameter_grid=ParameterGrid.from_simple({
+            "trainer/objective/objectives/clf/weight": ([0.8], "categorical"),
+            "trainer/objective/objectives/reg/weight": ([0.2], "categorical"),
+        }),
+        splitter_cls=StratifiedKFold,
+        n_splits=2,
+        final_model_dir=str(tmp_path),
+    )
+
+    _built_model_spec, built_trainer_spec, trainer = cv._build_trainer_for_trial(
+        params={
+            "trainer/objective/objectives/clf/weight": 0.85,
+            "trainer/objective/objectives/reg/weight": 0.15,
+        }
+    )
+
+    assert isinstance(built_trainer_spec.objective, MultitaskObjective)
+    assert built_trainer_spec.objective.objectives["clf"].weight == pytest.approx(0.85)
+    assert built_trainer_spec.objective.objectives["reg"].weight == pytest.approx(0.15)
+    assert isinstance(trainer.objective, MultitaskObjective)
+    assert trainer.objective.objectives["clf"].weight == pytest.approx(0.85)
+    assert trainer.objective.objectives["reg"].weight == pytest.approx(0.15)
 
 
 def test_base_search_cv_validates_projected_parameter_targets(tmp_path):

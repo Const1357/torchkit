@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import Any, Literal
 import warnings
+import copy
 
 try:
     from typing import override  # py3.12+
@@ -9,6 +10,7 @@ except ImportError:
 
 import torch
 from torch import Tensor
+from torch.nn import ModuleDict
 
 from torchkit.objectives._base import Objective
 
@@ -19,51 +21,56 @@ class MultitaskObjective(Objective):
 
     def __init__(
         self,
-        *objectives: Objective | list[Objective] | tuple[Objective, ...],
+        objectives: dict[str, Objective],
         name: str,
         weight: float = 1.0,
         reduction: Literal["mean", "sum"] = "mean",
         is_optional: bool = False,
     ):
-        if len(objectives) == 1 and isinstance(objectives[0], (list, tuple)):
-            objs = list(objectives[0])
-        else:
-            objs = list(objectives)
-
-        if not objs:
+        if not isinstance(objectives, dict):
+            raise TypeError(
+                f"MultitaskObjective.objectives must be a dict[str, Objective], got {type(objectives).__name__}."
+            )
+        if not objectives:
             raise ValueError("At least one objective must be provided.")
 
-        for i, obj in enumerate(objs):
+        copied_objectives: dict[str, Objective] = {}
+        for key, obj in objectives.items():
+            if not isinstance(key, str) or not key:
+                raise ValueError(f"Objective keys must be non-empty strings, got {key!r}.")
             if not isinstance(obj, Objective):
                 raise TypeError(
-                    f"All objectives must derive from Objective, got {type(obj).__name__} at index {i}."
+                    f"All objectives must derive from Objective, got {type(obj).__name__} for key {key!r}."
                 )
+            copied = copy.deepcopy(obj)
+            copied.name = key
+            copied_objectives[key] = copied
 
-        if (not is_optional) and all(obj.is_optional for obj in objs):
+        if (not is_optional) and all(obj.is_optional for obj in copied_objectives.values()):
             raise ValueError(
                 "MultitaskObjective is required but all contained objectives are optional."
             )
 
         super().__init__(name=name, weight=weight, is_optional=is_optional, reduction=reduction)
-        self._objectives: tuple[Objective, ...] = tuple(objs)
-        if not all(obj.reduction == self.reduction for obj in self._objectives):
+        self._objectives = ModuleDict(copied_objectives)
+        if not all(obj.reduction == self.reduction for obj in self._objectives.values()):
             raise ValueError(
                 f"All contained objectives must have the same reduction as the MultitaskObjective. "
-                f"Expected reduction {self.reduction}, but got {[obj.reduction for obj in self._objectives]}."
+                f"Expected reduction {self.reduction}, but got {[obj.reduction for obj in self._objectives.values()]}."
             )
 
         # diagnostics container (populated on forward/loss)
         self.per_objective_loss: dict[str, float | list[float]] = {}
 
     @property
-    def objectives(self) -> tuple[Objective, ...]:
-        return self._objectives
+    def objectives(self) -> dict[str, Objective]:
+        return dict(self._objectives.items())
 
     @property
     def required_keys(self) -> tuple[str, ...]:
         # Union of required paths across contained objectives
         keys: set[str] = set()
-        for obj in self._objectives:
+        for obj in self._objectives.values():
             keys.update(obj.required_keys)
         return tuple(sorted(keys))
 
@@ -72,16 +79,16 @@ class MultitaskObjective(Objective):
         total_loss: Tensor | None = None
         self.per_objective_loss = {}
 
-        for obj in self._objectives:
+        for key, obj in self._objectives.items():
             obj_loss = obj(inputs=inputs)
             weighted = obj.weight * obj_loss
 
             # diagnostics (detach)
             with torch.no_grad():
                 if obj_loss.ndim == 0:
-                    self.per_objective_loss[obj.name] = float(obj_loss.detach().cpu().item())
+                    self.per_objective_loss[key] = float(obj_loss.detach().cpu().item())
                 else:
-                    self.per_objective_loss[obj.name] = obj_loss.detach().cpu().flatten().tolist()
+                    self.per_objective_loss[key] = obj_loss.detach().cpu().flatten().tolist()
 
             total_loss = weighted if total_loss is None else (total_loss + weighted)
 
