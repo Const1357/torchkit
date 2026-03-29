@@ -10,7 +10,7 @@ import torch
 from torch import Tensor, nn
 from torch.utils.data import DataLoader, Dataset
 
-from torchkit.train.trainer import Trainer, TrainerConfig, _move_to_device
+from torchkit.train.trainer import EpochControl, EpochResult, Trainer, TrainerConfig, _move_to_device
 from torchkit.models.Model._model import TorchkitModel
 from torchkit.models.backbone._backbone import Backbone
 from torchkit.models.head._task_head import TaskHead
@@ -390,6 +390,154 @@ def test_trainer_fit_end_to_end_without_validation(
     assert trainer.state.best_epoch is None
     assert trainer.state.best_metric is None
     assert len(trainer.history) == 1
+
+
+def test_trainer_validate_every_controls_validation_frequency(
+    trainer: Trainer,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+):
+    trainer.fit(train_loader, val_loader, validate_every=2)
+
+    assert len(trainer.state.train_logs) == 3
+    assert [entry["epoch"] for entry in trainer.state.val_logs] == [2, 3]
+
+
+def test_trainer_fit_iter_yields_epoch_results(
+    trainer: Trainer,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+):
+    events = list(trainer.fit_iter(train_loader, val_loader, validate_every=2))
+
+    assert all(isinstance(event, EpochResult) for event in events)
+    assert [event.epoch for event in events] == [1, 2, 3]
+    assert [event.did_validate for event in events] == [False, True, True]
+    assert events[-1].val_log is not None
+    assert len(trainer.history) == 1
+
+
+def test_trainer_after_validation_hook_only_runs_on_validation_epochs(
+    trainer: Trainer,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+):
+    seen_epochs: list[int] = []
+
+    def hook(_trainer: Trainer, event: EpochResult) -> None:
+        assert event.did_validate is True
+        assert event.val_log is not None
+        seen_epochs.append(event.epoch)
+        return None
+
+    trainer.fit(
+        train_loader,
+        val_loader,
+        validate_every=2,
+        after_validation=hook,
+    )
+
+    assert seen_epochs == [2, 3]
+
+
+def test_trainer_on_epoch_end_hook_runs_every_epoch(
+    trainer: Trainer,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+):
+    seen_events: list[tuple[int, bool]] = []
+
+    def hook(_trainer: Trainer, event: EpochResult) -> None:
+        seen_events.append((event.epoch, event.did_validate))
+        return None
+
+    trainer.fit(
+        train_loader,
+        val_loader,
+        validate_every=2,
+        on_epoch_end=hook,
+    )
+
+    assert seen_events == [(1, False), (2, True), (3, True)]
+
+
+def test_trainer_hook_can_stop_training(
+    trainer: Trainer,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+):
+    trainer.fit(
+        train_loader,
+        val_loader,
+        on_epoch_end=lambda _trainer, event: EpochControl(stop_training=(event.epoch == 1)),
+    )
+
+    assert trainer.state.epoch == 1
+    assert len(trainer.state.train_logs) == 1
+
+
+def test_trainer_hook_can_override_trial_reporting(
+    trainer: Trainer,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+):
+    trial = DummyTrial()
+
+    trainer.fit(
+        train_loader,
+        val_loader,
+        trial=trial,
+        validate_every=2,
+        after_validation=lambda _trainer, event: EpochControl(
+            report_value=float(10 + event.epoch),
+            suppress_default_report=True,
+        ),
+    )
+
+    assert trial.reports == [(12.0, 2), (13.0, 3)]
+
+
+def test_trainer_default_trial_reporting_follows_validation_schedule(
+    trainer: Trainer,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+):
+    trial = DummyTrial()
+
+    trainer.fit(
+        train_loader,
+        val_loader,
+        trial=trial,
+        validate_every=2,
+    )
+
+    assert [step for _value, step in trial.reports] == [2, 3]
+
+
+def test_trainer_hook_can_prune_training(
+    trainer: Trainer,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+):
+    with pytest.raises(optuna.TrialPruned):
+        trainer.fit(
+            train_loader,
+            val_loader,
+            after_validation=lambda _trainer, _event: EpochControl(prune_trial=True),
+        )
+
+
+def test_trainer_hook_return_type_is_validated(
+    trainer: Trainer,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+):
+    with pytest.raises(TypeError, match="EpochControl"):
+        trainer.fit(
+            train_loader,
+            val_loader,
+            on_epoch_end=lambda _trainer, _event: "bad",
+        )
 
 
 def test_trainer_logging_writes_structured_jsonl(

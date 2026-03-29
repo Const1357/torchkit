@@ -33,6 +33,8 @@ from torchkit.evaluate.select.bundle import BundleSelectorEvaluator
 
 from torchkit.train.cv.optuna_search_cv import OptunaSearchCV
 from torchkit.train.cv.nested_optuna_search_cv import NestedOptunaSearchCV
+from torchkit.train.cv.in_memory_optuna_search_cv import InMemoryOptunaSearchCV
+from torchkit.train.cv.in_memory_nested_optuna_search_cv import InMemoryNestedOptunaSearchCV
 
 
 class DeterministicBackbone(Backbone):
@@ -348,6 +350,81 @@ def make_nested_cv(
     keep_final_model_state_dict_cpu: bool = True,
 ) -> NestedOptunaSearchCV:
     return NestedOptunaSearchCV(
+        model_spec=model_spec,
+        trainer_spec=trainer_spec,
+        parameter_grid=parameter_grid,
+        outer_splitter_cls=outer_splitter_cls,
+        inner_splitter_cls=inner_splitter_cls,
+        dataloader_factory=lambda ds, shuffle: torch.utils.data.DataLoader(ds, batch_size=2, shuffle=shuffle),
+        n_trials=n_trials,
+        max_trial_attempts=max_trial_attempts,
+        k_outer=k_outer,
+        k_inner=k_inner,
+        shuffle_outer=False,
+        shuffle_inner=False,
+        random_state=random_state,
+        calibrate=calibrate,
+        report_evaluator=report_evaluator,
+        logging=logging,
+        final_model_dir=str(tmp_path),
+        keep_final_model_state_dict_cpu=keep_final_model_state_dict_cpu,
+    )
+
+
+def make_in_memory_optuna_search_cv(
+    *,
+    model_spec: TorchkitModelSpec,
+    trainer_spec: TrainerSpec,
+    splitter_cls,
+    parameter_grid: ParameterGrid,
+    tmp_path,
+    n_trials: int = 1,
+    max_trial_attempts: int = 5,
+    n_splits: int = 2,
+    random_state: Optional[int] = None,
+    calibrate: bool = True,
+    report_evaluator: Optional[BundleReportEvaluator] = None,
+    logging: bool = False,
+    keep_final_model_state_dict_cpu: bool = True,
+) -> InMemoryOptunaSearchCV:
+    return InMemoryOptunaSearchCV(
+        model_spec=model_spec,
+        trainer_spec=trainer_spec,
+        parameter_grid=parameter_grid,
+        splitter_cls=splitter_cls,
+        dataloader_factory=lambda ds, shuffle: torch.utils.data.DataLoader(ds, batch_size=2, shuffle=shuffle),
+        n_trials=n_trials,
+        max_trial_attempts=max_trial_attempts,
+        n_splits=n_splits,
+        shuffle=False,
+        random_state=random_state,
+        calibrate=calibrate,
+        report_evaluator=report_evaluator,
+        logging=logging,
+        final_model_dir=str(tmp_path),
+        keep_final_model_state_dict_cpu=keep_final_model_state_dict_cpu,
+    )
+
+
+def make_in_memory_nested_cv(
+    *,
+    model_spec: TorchkitModelSpec,
+    trainer_spec: TrainerSpec,
+    outer_splitter_cls,
+    inner_splitter_cls,
+    parameter_grid: ParameterGrid,
+    tmp_path,
+    n_trials: int = 1,
+    max_trial_attempts: int = 5,
+    k_outer: int = 2,
+    k_inner: int = 2,
+    random_state: Optional[int] = None,
+    calibrate: bool = True,
+    report_evaluator: Optional[BundleReportEvaluator] = None,
+    logging: bool = False,
+    keep_final_model_state_dict_cpu: bool = True,
+) -> InMemoryNestedOptunaSearchCV:
+    return InMemoryNestedOptunaSearchCV(
         model_spec=model_spec,
         trainer_spec=trainer_spec,
         parameter_grid=parameter_grid,

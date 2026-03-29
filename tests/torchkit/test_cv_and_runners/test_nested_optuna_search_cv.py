@@ -138,6 +138,8 @@ def test_nested_cv_logs_everything_needed_for_reporting_stratified(
         assert sorted(trial.aggregate_oof_sample_indices) == sorted(inner.search_pool_indices)
         assert sorted(inner.search_pool_indices) == sorted(outer.outer_train_indices)
         assert set(trial.aggregate_oof_sample_indices).isdisjoint(set(outer.outer_test_indices))
+        assert trial.intermediate_reports == []
+        assert trial.pruned_epoch is None
         assert trial.aggregate_fold_report_results is not None
         assert trial.aggregate_fold_report_results["clf/accuracy"] == [pytest.approx(1.0), pytest.approx(1.0)]
         assert inner.selected_fold_report_results is not None

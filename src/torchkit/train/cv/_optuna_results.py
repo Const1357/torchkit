@@ -218,6 +218,8 @@ class OptunaTrialResult:
 
     aggregate_metric: Optional[float]
     aggregate_selection_score: Optional[float]
+    intermediate_reports: list[dict[str, Any]] = field(default_factory=list)
+    pruned_epoch: Optional[int] = None
 
     fold_results: list[FoldResult] = field(default_factory=list)
     aggregate_fold_report_results: Optional[dict[str, list[Any]]] = None
@@ -242,6 +244,8 @@ class OptunaTrialResult:
             "status": self.status,
             "aggregate_metric": self.aggregate_metric,
             "aggregate_selection_score": self.aggregate_selection_score,
+            "intermediate_reports": copy.deepcopy(self.intermediate_reports),
+            "pruned_epoch": self.pruned_epoch,
             "aggregate_fold_report_results": copy.deepcopy(self.aggregate_fold_report_results),
             "log_file": self.log_file,
             "aggregate_oof_sample_indices": copy.deepcopy(self.aggregate_oof_sample_indices),
@@ -271,6 +275,8 @@ class OptunaTrialResult:
             "status": self.status,
             "aggregate_metric": self.aggregate_metric,
             "aggregate_selection_score": self.aggregate_selection_score,
+            "n_intermediate_reports": len(self.intermediate_reports),
+            "pruned_epoch": self.pruned_epoch,
             "n_fold_results": len(self.fold_results),
             "n_aggregate_oof": len(self.aggregate_oof_sample_indices),
             "error_message": self.error_message,

@@ -263,6 +263,71 @@ class OptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
             )
         return trial_result
 
+    def _default_trial_log_file(self, *, trial_number: int) -> Optional[str]:
+        if not self.logging or self.log_dir is None:
+            return None
+        return os.path.join(self.log_dir, "trials", f"trial_{trial_number:03d}.log.jsonl")
+
+    def _build_pruned_trial_result(
+        self,
+        *,
+        trial: optuna.Trial,
+        exception: BaseException,
+        traceback_text: str,
+    ) -> OptunaTrialResult:
+        provided = getattr(exception, "trial_result", None)
+        if isinstance(provided, OptunaTrialResult):
+            if provided.error_message is None:
+                provided.error_message = str(exception)
+            if provided.error_traceback is None:
+                provided.error_traceback = traceback_text
+            if provided.log_file is None:
+                provided.log_file = self._default_trial_log_file(trial_number=trial.number)
+            return provided
+
+        return OptunaTrialResult(
+            trial_number=trial.number,
+            params=copy.deepcopy(dict(trial.params)),
+            status="PRUNED",
+            aggregate_metric=None,
+            aggregate_selection_score=None,
+            intermediate_reports=[],
+            pruned_epoch=None,
+            fold_results=[],
+            aggregate_fold_report_results=None,
+            log_file=self._default_trial_log_file(trial_number=trial.number),
+            aggregate_oof_logits={},
+            aggregate_oof_targets={},
+            aggregate_oof_sample_indices=[],
+            error_message=str(exception),
+            error_traceback=traceback_text,
+        )
+
+    def _build_failed_trial_result(
+        self,
+        *,
+        trial: optuna.Trial,
+        exception: BaseException,
+        traceback_text: str,
+    ) -> OptunaTrialResult:
+        return OptunaTrialResult(
+            trial_number=trial.number,
+            params=copy.deepcopy(dict(trial.params)),
+            status="FAILED",
+            aggregate_metric=None,
+            aggregate_selection_score=None,
+            intermediate_reports=[],
+            pruned_epoch=None,
+            fold_results=[],
+            aggregate_fold_report_results=None,
+            log_file=self._default_trial_log_file(trial_number=trial.number),
+            aggregate_oof_logits={},
+            aggregate_oof_targets={},
+            aggregate_oof_sample_indices=[],
+            error_message=f"{type(exception).__name__}: {exception}",
+            error_traceback=traceback_text,
+        )
+
     def run(
         self,
         dataset: TorchkitDataset,
@@ -356,24 +421,10 @@ class OptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
             except optuna.TrialPruned as e:
                 tb = traceback.format_exc()
                 study.tell(trial, state=TrialState.PRUNED)
-                pruned_result = OptunaTrialResult(
-                    trial_number=trial.number,
-                    params=copy.deepcopy(dict(trial.params)),
-                    status="PRUNED",
-                    aggregate_metric=None,
-                    aggregate_selection_score=None,
-                    fold_results=[],
-                    aggregate_fold_report_results=None,
-                    log_file=(
-                        os.path.join(self.log_dir, "trials", f"trial_{trial.number:03d}.log.jsonl")
-                        if self.logging and self.log_dir is not None
-                        else None
-                    ),
-                    aggregate_oof_logits={},
-                    aggregate_oof_targets={},
-                    aggregate_oof_sample_indices=[],
-                    error_message=str(e),
-                    error_traceback=tb,
+                pruned_result = self._build_pruned_trial_result(
+                    trial=trial,
+                    exception=e,
+                    traceback_text=tb,
                 )
                 trial_results.append(pruned_result)
                 pruned_trials += 1
@@ -392,24 +443,10 @@ class OptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
             except Exception as e:
                 tb = traceback.format_exc()
                 study.tell(trial, state=TrialState.FAIL)
-                failed_result = OptunaTrialResult(
-                    trial_number=trial.number,
-                    params=copy.deepcopy(dict(trial.params)),
-                    status="FAILED",
-                    aggregate_metric=None,
-                    aggregate_selection_score=None,
-                    fold_results=[],
-                    aggregate_fold_report_results=None,
-                    log_file=(
-                        os.path.join(self.log_dir, "trials", f"trial_{trial.number:03d}.log.jsonl")
-                        if self.logging and self.log_dir is not None
-                        else None
-                    ),
-                    aggregate_oof_logits={},
-                    aggregate_oof_targets={},
-                    aggregate_oof_sample_indices=[],
-                    error_message=f"{type(e).__name__}: {e}",
-                    error_traceback=tb,
+                failed_result = self._build_failed_trial_result(
+                    trial=trial,
+                    exception=e,
+                    traceback_text=tb,
                 )
                 trial_results.append(failed_result)
                 failed_trials += 1

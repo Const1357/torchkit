@@ -184,6 +184,8 @@ def test_optuna_search_cv_logs_everything_needed_for_reporting_stratified(
     assert trial.params["trainer/config/max_epochs"] == 2
     assert trial.aggregate_metric == pytest.approx(1.0)
     assert trial.aggregate_selection_score == pytest.approx(1.0)
+    assert trial.intermediate_reports == []
+    assert trial.pruned_epoch is None
     assert trial.aggregate_fold_report_results is not None
     assert trial.aggregate_fold_report_results["clf/accuracy"] == [pytest.approx(1.0), pytest.approx(1.0)]
     assert trial.log_file is not None

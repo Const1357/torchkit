@@ -7,6 +7,7 @@ import copy
 from torchkit.models.Model._model import TorchkitModel
 from torchkit.models.Model.factory import TorchkitModelFactory, TorchkitModelSpec
 from torchkit.objectives import Objective
+from torchkit.distributed import DDPStrategy
 from torchkit.evaluate.select.bundle import BundleSelectorEvaluator
 from torchkit.train.trainer import Trainer, TrainerConfig
 
@@ -17,6 +18,7 @@ class TrainerSpec:
     objective: Optional[Objective] = None
     selector_evaluator: Optional[BundleSelectorEvaluator] = None
     logging: bool = False
+    distributed_strategy: Optional[DDPStrategy] = None
     config: TrainerConfig = field(default_factory=TrainerConfig)
 
 
@@ -45,6 +47,7 @@ class TrainerFactory:
             selector_evaluator=spec.selector_evaluator,
             config=copy.deepcopy(spec.config),
             logging=spec.logging,
+            distributed_strategy=copy.deepcopy(spec.distributed_strategy),
         )
 
         return trainer

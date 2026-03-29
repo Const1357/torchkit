@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
-from typing import Any, Literal, Optional
+from typing import Any, Callable, Iterator, Literal, Optional
 import copy
 import math
 import os
@@ -11,6 +11,7 @@ from torch import Tensor
 
 import optuna
 
+from torchkit.distributed import DDPStrategy
 from torchkit.models.Model._model import TorchkitModel
 from torchkit.objectives import Objective, MultitaskObjective
 from torchkit.evaluate.select.bundle import BundleSelectorEvaluator, SelectorEvaluator
@@ -60,6 +61,7 @@ class TrainerConfig:
     grad_clip_norm: Optional[float] = None
 
     max_epochs: int = 50
+    validate_every: int = 1
     early_stopping_patience: Optional[int] = None
     early_stopping_threshold: Optional[float] = None
 
@@ -87,7 +89,53 @@ class TrainerState:
     oof_targets: dict[str, torch.Tensor] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class EpochResult:
+    epoch: int
+    train_log: dict[str, Any]
+    val_log: Optional[dict[str, Any]]
+    did_validate: bool
+    best_epoch: Optional[int]
+    best_metric: Optional[float]
+    epochs_since_improvement: int
+    selection_score: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class EpochControl:
+    stop_training: bool = False
+    prune_trial: bool = False
+    report_value: Optional[float] = None
+    suppress_default_report: bool = False
+
+
 class Trainer:
+    @staticmethod
+    def _resolve_runtime_device(
+        configured_device: Optional[str | torch.device],
+        *,
+        distributed_strategy: Optional[DDPStrategy],
+        fallback_model: TorchkitModel,
+    ) -> torch.device:
+        if configured_device is not None:
+            resolved = torch.device(configured_device)
+            if (
+                distributed_strategy is not None
+                and distributed_strategy.is_enabled
+                and resolved.type == "cuda"
+                and resolved.index is None
+            ):
+                return distributed_strategy.device
+            return resolved
+
+        if distributed_strategy is not None and distributed_strategy.is_enabled:
+            return distributed_strategy.device
+
+        try:
+            return next(fallback_model.parameters()).device
+        except StopIteration:
+            return torch.device("cpu")
+
     def __init__(
         self,
         model: TorchkitModel,
@@ -96,21 +144,22 @@ class Trainer:
         selector_evaluator: Optional[BundleSelectorEvaluator] = None,
         config: Optional[TrainerConfig] = None,
         logging: bool = False,
+        distributed_strategy: Optional[DDPStrategy] = None,
     ):
         self.model = model
         self.objective = objective
         self.selector_evaluator = selector_evaluator
         self.logging = bool(logging)
+        self.distributed_strategy = distributed_strategy
+        self._fit_model: torch.nn.Module = model
 
         self.config: TrainerConfig = copy.deepcopy(config) if config is not None else TrainerConfig()
 
-        resolved_device = self.config.device
-        if resolved_device is None:
-            try:
-                resolved_device = next(model.parameters()).device
-            except StopIteration:
-                resolved_device = torch.device("cpu")
-        self.device = resolved_device
+        self.device = self._resolve_runtime_device(
+            self.config.device,
+            distributed_strategy=self.distributed_strategy,
+            fallback_model=self.model,
+        )
 
         self._initial_state_dict_cpu: dict[str, torch.Tensor] = self._load_initial_state_dict_cpu(
             model=self.model,
@@ -140,6 +189,12 @@ class Trainer:
             self.log_dir = os.path.dirname(logger.path)
 
     def _ensure_event_logger(self) -> Optional[JsonlEventLogger]:
+        if (
+            self.distributed_strategy is not None
+            and self.distributed_strategy.is_enabled
+            and not self.distributed_strategy.is_main_process
+        ):
+            return None
         if self._event_logger is not None:
             return self._event_logger
         if not self.logging:
@@ -216,7 +271,11 @@ class Trainer:
         if update_device:
             if self.config.device is None:
                 raise ValueError("device cannot be None in set_params; pass a device or call reset_config().")
-            self.device = self.config.device
+            self.device = self._resolve_runtime_device(
+                self.config.device,
+                distributed_strategy=self.distributed_strategy,
+                fallback_model=self.model,
+            )
             self.model.to(self.device)
 
         if rebuild_optimizer or rebuild_scheduler or rebuild_scaler:
@@ -230,7 +289,11 @@ class Trainer:
 
     def reset_config(self) -> None:
         self.config = copy.deepcopy(self._base_config)
-        self.device = self.config.device or self.device
+        self.device = self._resolve_runtime_device(
+            self.config.device,
+            distributed_strategy=self.distributed_strategy,
+            fallback_model=self.model,
+        )
         self.model.to(self.device)
         self._rebuild_stateful_objects_from_config()
 
@@ -253,13 +316,92 @@ class Trainer:
     def detach_model(self) -> TorchkitModel:
         return self.model
 
+    @staticmethod
+    def _merge_epoch_controls(
+        left: Optional[EpochControl],
+        right: Optional[EpochControl],
+    ) -> Optional[EpochControl]:
+        if left is None:
+            return right
+        if right is None:
+            return left
+        return EpochControl(
+            stop_training=bool(left.stop_training or right.stop_training),
+            prune_trial=bool(left.prune_trial or right.prune_trial),
+            report_value=right.report_value if right.report_value is not None else left.report_value,
+            suppress_default_report=bool(left.suppress_default_report or right.suppress_default_report),
+        )
+
+    @staticmethod
+    def _validate_epoch_control(
+        control: Optional[EpochControl],
+        *,
+        hook_name: str,
+    ) -> Optional[EpochControl]:
+        if control is None:
+            return None
+        if not isinstance(control, EpochControl):
+            raise TypeError(f"{hook_name} must return EpochControl or None, got {type(control).__name__}.")
+        return control
+
+    @staticmethod
+    def _default_report_value_for_epoch(epoch_result: EpochResult) -> float:
+        if epoch_result.did_validate and epoch_result.val_log is not None:
+            score = epoch_result.val_log.get("__selection_score__", None)
+            if score is None:
+                score = -float(epoch_result.val_log["val_loss"])
+            return float(score)
+        return -float(epoch_result.train_log["train_loss"])
+
+    def _distributed_enabled(self) -> bool:
+        return bool(self.distributed_strategy is not None and self.distributed_strategy.is_enabled)
+
+    def _gather_object(self, obj: Any) -> list[Any]:
+        if not self._distributed_enabled():
+            return [obj]
+        assert self.distributed_strategy is not None
+        return self.distributed_strategy.all_gather_object(obj)
+
+    @staticmethod
+    def _sum_float_dicts(dicts: list[dict[str, float]]) -> dict[str, float]:
+        merged: dict[str, float] = {}
+        for part in dicts:
+            for key, value in part.items():
+                merged[key] = merged.get(key, 0.0) + float(value)
+        return merged
+
+    @staticmethod
+    def _sum_nested_float_dicts(dicts: list[dict[str, dict[str, float]]]) -> dict[str, dict[str, float]]:
+        merged: dict[str, dict[str, float]] = {}
+        for part in dicts:
+            for outer_key, inner_dict in part.items():
+                slot = merged.setdefault(outer_key, {})
+                for inner_key, value in inner_dict.items():
+                    slot[inner_key] = slot.get(inner_key, 0.0) + float(value)
+        return merged
+
+    @staticmethod
+    def _concat_tensor_fragments(
+        fragments: list[torch.Tensor],
+        *,
+        key: str,
+    ) -> torch.Tensor:
+        if len(fragments) == 0:
+            raise ValueError(f"Empty tensor fragments for key {key!r} (unexpected).")
+        if len(fragments) == 1:
+            return fragments[0]
+        if fragments[0].ndim == 0:
+            return torch.stack(fragments, dim=0)
+        return torch.cat(fragments, dim=0)
+
     def _train_one_epoch(
         self,
         train_loader: torch.utils.data.DataLoader,
         *,
         epoch: int,
     ) -> dict[str, Any]:
-        self.model.train()
+        train_model = self._fit_model
+        train_model.train()
 
         device = self.device
         if not isinstance(device, torch.device):
@@ -268,8 +410,7 @@ class Trainer:
         total_loss = 0.0
         num_batches = 0
 
-        if isinstance(self.objective, MultitaskObjective):
-            per_objective_sum_loss: dict[str, float] = {}
+        per_objective_sum_loss: dict[str, float] = {}
 
         for batch in train_loader:
             if not isinstance(batch, dict):
@@ -289,7 +430,7 @@ class Trainer:
 
             if self.config.use_amp:
                 with torch.autocast(device_type=device.type):
-                    model_out = self.model(batch, backbone_kwargs=self.config.backbone_kwargs, head_kwargs=self.config.head_kwargs)
+                    model_out = train_model(batch, backbone_kwargs=self.config.backbone_kwargs, head_kwargs=self.config.head_kwargs)
                     objective_in = dict(model_out)
                     objective_in["batch"] = batch
                     loss: Tensor = self.objective(inputs=objective_in)
@@ -301,7 +442,7 @@ class Trainer:
                 self._scaler.step(self.optimizer)
                 self._scaler.update()
             else:
-                model_out = self.model(batch, backbone_kwargs=self.config.backbone_kwargs, head_kwargs=self.config.head_kwargs)
+                model_out = train_model(batch, backbone_kwargs=self.config.backbone_kwargs, head_kwargs=self.config.head_kwargs)
                 objective_in = dict(model_out)
                 objective_in["batch"] = batch
                 loss = self.objective(inputs=objective_in)
@@ -318,6 +459,19 @@ class Trainer:
                 for o, l in self.objective.per_objective_loss.items():
                     fl = float(l.detach().item()) if isinstance(l, torch.Tensor) else float(l)
                     per_objective_sum_loss[o] = per_objective_sum_loss.get(o, 0.0) + fl
+
+        gathered_summaries = self._gather_object(
+            {
+                "total_loss": float(total_loss),
+                "num_batches": int(num_batches),
+                "per_objective_sum_loss": copy.deepcopy(per_objective_sum_loss),
+            }
+        )
+        total_loss = sum(float(part["total_loss"]) for part in gathered_summaries)
+        num_batches = sum(int(part["num_batches"]) for part in gathered_summaries)
+        per_objective_sum_loss = self._sum_float_dicts(
+            [dict(part["per_objective_sum_loss"]) for part in gathered_summaries]
+        )
 
         if num_batches == 0:
             raise ValueError("train_loader produced 0 batches.")
@@ -443,13 +597,7 @@ class Trainer:
             cache[key].append(tensor.detach().cpu())
 
         def _cat_cached_list(ts: list[torch.Tensor], key: str) -> torch.Tensor:
-            if len(ts) == 0:
-                raise ValueError(f"Empty cache list for key {key!r} (unexpected).")
-            if len(ts) == 1:
-                return ts[0]
-            if ts[0].ndim == 0:
-                return torch.stack(ts, dim=0)
-            return torch.cat(ts, dim=0)
+            return self._concat_tensor_fragments(ts, key=key)
 
         def _is_finite_number(x: Any) -> bool:
             if x is None:
@@ -632,8 +780,59 @@ class Trainer:
                         oof_logits_cache[task].append(logits.detach().cpu())
                         oof_targets_cache[task].append(targets.detach().cpu())
 
+        local_dataset_cache = {
+            key: _cat_cached_list(ts, key=key)
+            for key, ts in dataset_cache.items()
+            if len(ts) > 0
+        }
+        local_oof_cache = {
+            "logits": {
+                task: _cat_cached_list(ts, key=f"{task}/logits")
+                for task, ts in oof_logits_cache.items()
+                if len(ts) > 0
+            },
+            "targets": {
+                task: _cat_cached_list(ts, key=f"{task}/targets")
+                for task, ts in oof_targets_cache.items()
+                if len(ts) > 0
+            },
+        }
+        gathered_summaries = self._gather_object(
+            {
+                "total_loss": float(total_loss),
+                "num_batches": int(num_batches),
+                "batch_selector_weight_sum": float(batch_selector_weight_sum),
+                "batch_selector_weighted_value_sum": float(batch_selector_weighted_value_sum),
+                "batch_selector_component_sums": copy.deepcopy(batch_selector_component_sums),
+                "dataset_cache": local_dataset_cache,
+                "oof_cache": local_oof_cache,
+            }
+        )
+
+        total_loss = sum(float(part["total_loss"]) for part in gathered_summaries)
+        num_batches = sum(int(part["num_batches"]) for part in gathered_summaries)
+        batch_selector_weight_sum = sum(float(part["batch_selector_weight_sum"]) for part in gathered_summaries)
+        batch_selector_weighted_value_sum = sum(float(part["batch_selector_weighted_value_sum"]) for part in gathered_summaries)
+        batch_selector_component_sums = self._sum_nested_float_dicts(
+            [dict(part["batch_selector_component_sums"]) for part in gathered_summaries]
+        )
+
+        dataset_cache = defaultdict(list)
+        for part in gathered_summaries:
+            for key, tensor in dict(part["dataset_cache"]).items():
+                dataset_cache[key].append(tensor)
+
+        gathered_oof_logits: dict[str, list[torch.Tensor]] = defaultdict(list)
+        gathered_oof_targets: dict[str, list[torch.Tensor]] = defaultdict(list)
+        for part in gathered_summaries:
+            oof_cache = dict(part["oof_cache"])
+            for task, tensor in dict(oof_cache.get("logits", {})).items():
+                gathered_oof_logits[task].append(tensor)
+            for task, tensor in dict(oof_cache.get("targets", {})).items():
+                gathered_oof_targets[task].append(tensor)
+
         if num_batches == 0:
-            raise ValueError("val_loader produced 0 batches.")
+            raise ValueError("val_loader produced 0 batches across all ranks.")
 
         epoch_log: dict[str, Any] = {
             "epoch": epoch,
@@ -717,15 +916,15 @@ class Trainer:
                     self.state.oof_targets = {}
 
                 for task in active_posthoc_tasks:
-                    ls = oof_logits_cache.get(task, [])
-                    ts = oof_targets_cache.get(task, [])
+                    ls = gathered_oof_logits.get(task, [])
+                    ts = gathered_oof_targets.get(task, [])
                     if len(ls) == 0 or len(ts) == 0:
                         self.state.oof_logits[task] = torch.empty(0)
                         self.state.oof_targets[task] = torch.empty(0)
                         continue
 
-                    log_cat = torch.cat(ls, dim=0) if ls[0].ndim >= 1 else torch.stack(ls, dim=0)
-                    tgt_cat = torch.cat(ts, dim=0) if ts[0].ndim >= 1 else torch.stack(ts, dim=0)
+                    log_cat = _cat_cached_list(ls, key=f"{task}/logits")
+                    tgt_cat = _cat_cached_list(ts, key=f"{task}/targets")
 
                     self.state.oof_logits[task] = log_cat
                     self.state.oof_targets[task] = tgt_cat
@@ -749,11 +948,56 @@ class Trainer:
         early_stopping_threshold: Optional[float] = None,
         grad_clip_norm: Optional[float] = None,
         optuna_report_interval: Optional[int] = None,
+        validate_every: Optional[int] = None,
+        after_validation: Optional[Callable[["Trainer", EpochResult], Optional[EpochControl]]] = None,
+        on_epoch_end: Optional[Callable[["Trainer", EpochResult], Optional[EpochControl]]] = None,
     ) -> "Trainer":
+        for _ in self.fit_iter(
+            train_loader,
+            val_loader,
+            reset_state=reset_state,
+            trial=trial,
+            max_epochs=max_epochs,
+            early_stopping_patience=early_stopping_patience,
+            early_stopping_threshold=early_stopping_threshold,
+            grad_clip_norm=grad_clip_norm,
+            optuna_report_interval=optuna_report_interval,
+            validate_every=validate_every,
+            after_validation=after_validation,
+            on_epoch_end=on_epoch_end,
+        ):
+            pass
+        return self
+
+    def fit_iter(
+        self,
+        train_loader: torch.utils.data.DataLoader,
+        val_loader: Optional[torch.utils.data.DataLoader] = None,
+        *,
+        reset_state: bool = True,
+        trial: Optional[optuna.trial.Trial] = None,
+        max_epochs: Optional[int] = None,
+        early_stopping_patience: Optional[int] = None,
+        early_stopping_threshold: Optional[float] = None,
+        grad_clip_norm: Optional[float] = None,
+        optuna_report_interval: Optional[int] = None,
+        validate_every: Optional[int] = None,
+        after_validation: Optional[Callable[["Trainer", EpochResult], Optional[EpochControl]]] = None,
+        on_epoch_end: Optional[Callable[["Trainer", EpochResult], Optional[EpochControl]]] = None,
+    ) -> Iterator[EpochResult]:
         old_grad_clip = self.config.grad_clip_norm
         old_pat = self.config.early_stopping_patience
         old_thr = self.config.early_stopping_threshold
         old_rep = self.config.optuna_report_interval
+        old_validate_every = self.config.validate_every
+        strategy = self.distributed_strategy
+        if strategy is not None and strategy.is_enabled:
+            strategy.initialize()
+            self.device = self._resolve_runtime_device(
+                self.config.device,
+                distributed_strategy=strategy,
+                fallback_model=self.model,
+            )
         logger = self._ensure_event_logger()
 
         if grad_clip_norm is not None:
@@ -764,6 +1008,8 @@ class Trainer:
             self.config.early_stopping_threshold = early_stopping_threshold
         if optuna_report_interval is not None:
             self.config.optuna_report_interval = optuna_report_interval
+        if validate_every is not None:
+            self.config.validate_every = validate_every
 
         try:
             if reset_state:
@@ -778,11 +1024,19 @@ class Trainer:
             device = self.device
             if not isinstance(device, torch.device):
                 device = torch.device(device)
+            self.device = device
             self.model.to(device)
+            self._fit_model = self.model
+            if strategy is not None and strategy.is_enabled:
+                self._fit_model = strategy.wrap_model(self.model)
 
             run_max_epochs = int(max_epochs) if max_epochs is not None else int(self.config.max_epochs)
             if run_max_epochs <= 0:
                 raise ValueError(f"max_epochs must be > 0, got {run_max_epochs}.")
+
+            run_validate_every = int(self.config.validate_every)
+            if run_validate_every <= 0:
+                raise ValueError(f"validate_every must be > 0, got {run_validate_every}.")
 
             patience = self.config.early_stopping_patience
             patience = None if patience is None else int(patience)
@@ -804,6 +1058,7 @@ class Trainer:
                         "device": str(device),
                         "use_amp": self.config.use_amp,
                         "scheduler_monitor": self.config.scheduler_monitor,
+                        "validate_every": run_validate_every,
                         "early_stopping_patience": patience,
                         "early_stopping_threshold": self.config.early_stopping_threshold,
                     },
@@ -816,13 +1071,26 @@ class Trainer:
 
             for ep in range(1, run_max_epochs + 1):
                 self.state.epoch = ep
+                if strategy is not None and strategy.is_enabled:
+                    strategy.set_epoch(train_loader, ep)
+                    if val_loader is not None:
+                        strategy.set_epoch(val_loader, ep)
 
                 train_log = self._train_one_epoch(train_loader, epoch=ep)
 
                 if self.scheduler is not None and not _scheduler_expects_metric(self.scheduler):
                     self.scheduler.step()
 
-                if val_loader is not None:
+                should_validate = (
+                    val_loader is not None
+                    and (((ep % run_validate_every) == 0) or (ep == run_max_epochs))
+                )
+
+                val_log: Optional[dict[str, Any]] = None
+                new_best_stored = False
+                stop_from_patience = False
+
+                if should_validate and val_loader is not None:
                     prev_best_epoch = self.state.best_epoch
                     val_log = self._validate_one_epoch(val_loader, epoch=ep)
                     new_best_stored = self.state.best_epoch == ep and self.state.best_epoch != prev_best_epoch
@@ -830,14 +1098,9 @@ class Trainer:
                     if self.scheduler is not None and _scheduler_expects_metric(self.scheduler):
                         self.scheduler.step(self._resolve_scheduler_monitor_value(val_log))
 
-                    if trial is not None and (ep % report_every == 0):
-                        score = val_log.get("__selection_score__", None)
-                        if score is None:
-                            score = -float(val_log["val_loss"])
-                        self.maybe_report_to_trial(trial, value=float(score), step=ep)
-
                     if patience is not None:
                         if self.state.epochs_since_improvement >= patience:
+                            stop_from_patience = True
                             if logger is not None:
                                 logger.emit(
                                     "trainer_early_stop",
@@ -853,7 +1116,6 @@ class Trainer:
                                         f"best_metric={self._format_metric(self.state.best_metric)}."
                                     ),
                                 )
-                            break
 
                     if logger is not None:
                         metric_key = "val/primary" if "val/primary" in val_log else "val_loss"
@@ -884,10 +1146,6 @@ class Trainer:
                         )
 
                 else:
-                    if trial is not None and (ep % report_every == 0):
-                        score = -float(train_log["train_loss"])
-                        self.maybe_report_to_trial(trial, value=float(score), step=ep)
-
                     if logger is not None:
                         logger.emit(
                             "trainer_epoch_end",
@@ -908,6 +1166,59 @@ class Trainer:
                                 f"train_loss={self._format_metric(train_log.get('train_loss'))}."
                             ),
                         )
+
+                selection_score = None
+                if val_log is not None:
+                    score_raw = val_log.get("__selection_score__", None)
+                    selection_score = None if score_raw is None else float(score_raw)
+
+                epoch_result = EpochResult(
+                    epoch=ep,
+                    train_log=copy.deepcopy(train_log),
+                    val_log=copy.deepcopy(val_log),
+                    did_validate=bool(should_validate),
+                    best_epoch=self.state.best_epoch,
+                    best_metric=self.state.best_metric,
+                    epochs_since_improvement=self.state.epochs_since_improvement,
+                    selection_score=selection_score,
+                )
+
+                control = None
+                if should_validate and after_validation is not None:
+                    control = self._merge_epoch_controls(
+                        control,
+                        self._validate_epoch_control(
+                            after_validation(self, epoch_result),
+                            hook_name="after_validation",
+                        ),
+                    )
+                if on_epoch_end is not None:
+                    control = self._merge_epoch_controls(
+                        control,
+                        self._validate_epoch_control(
+                            on_epoch_end(self, epoch_result),
+                            hook_name="on_epoch_end",
+                        ),
+                    )
+
+                if (trial is not None or self._distributed_enabled()) and (ep % report_every == 0):
+                    report_value = None
+                    if control is not None and control.report_value is not None:
+                        report_value = float(control.report_value)
+                    elif (val_loader is None or epoch_result.did_validate) and not (
+                        control is not None and control.suppress_default_report
+                    ):
+                        report_value = self._default_report_value_for_epoch(epoch_result)
+                    if report_value is not None:
+                        self.maybe_report_to_trial(trial, value=report_value, step=ep)
+
+                if control is not None and control.prune_trial:
+                    raise optuna.TrialPruned()
+
+                yield epoch_result
+
+                if stop_from_patience or (control is not None and control.stop_training):
+                    break
 
             self.history.append(
                 {
@@ -940,8 +1251,6 @@ class Trainer:
                     ),
                 )
 
-            return self
-
         except Exception as e:
             if logger is not None:
                 logger.emit(
@@ -955,10 +1264,12 @@ class Trainer:
                 )
             raise
         finally:
+            self._fit_model = self.model
             self.config.grad_clip_norm = old_grad_clip
             self.config.early_stopping_patience = old_pat
             self.config.early_stopping_threshold = old_thr
             self.config.optuna_report_interval = old_rep
+            self.config.validate_every = old_validate_every
 
     def maybe_report_to_trial(
         self,
@@ -967,6 +1278,17 @@ class Trainer:
         value: float,
         step: int,
     ) -> None:
+        if self._distributed_enabled():
+            assert self.distributed_strategy is not None
+            should_prune = False
+            if self.distributed_strategy.is_main_process and trial is not None:
+                trial.report(value, step)
+                should_prune = bool(trial.should_prune())
+            should_prune = bool(self.distributed_strategy.broadcast_object(should_prune, src=0))
+            if should_prune:
+                raise optuna.TrialPruned()
+            return
+
         if trial is None:
             return
         trial.report(value, step)
