@@ -122,13 +122,13 @@ class BaseSearchCV(BaseCV):
 
             self._validate_target_path(
                 target_path=path,
-                value=self._dummy_value_for_validation(spec.values),
+                value=self._dummy_value_for_validation(spec),
                 model_spec=model_spec,
                 trainer_spec=trainer_spec,
             )
 
         sampled_values = {
-            path: self._dummy_value_for_validation(spec.values)
+            path: self._dummy_value_for_validation(spec)
             for path, spec in self.parameter_grid.suggestions.items()
         }
         for derived in self.parameter_grid.derived_params:
@@ -141,10 +141,15 @@ class BaseSearchCV(BaseCV):
             )
 
     @staticmethod
-    def _dummy_value_for_validation(values: list[Any]) -> Any:
+    def _dummy_value_for_validation(spec: Any) -> Any:
+        values = spec.values
         if len(values) == 0:
             raise ValueError("Parameter grid values list must be non-empty.")
-        return values[0]
+        value = values[0]
+        projection_map = getattr(spec, "projection_map", None)
+        if projection_map is not None:
+            return projection_map[value]
+        return value
 
     @staticmethod
     def _validate_target_path(
@@ -154,6 +159,8 @@ class BaseSearchCV(BaseCV):
         model_spec: TorchkitModelSpec,
         trainer_spec: TrainerSpec,
     ) -> None:
+        if target_path.startswith("meta/"):
+            return
         if target_path.startswith("model/"):
             target = model_spec
             rel_path = target_path.removeprefix("model/")
@@ -162,7 +169,7 @@ class BaseSearchCV(BaseCV):
             rel_path = target_path.removeprefix("trainer/")
         else:
             raise ValueError(
-                f"Parameter path {target_path!r} must start with 'model/' or 'trainer/'."
+                f"Parameter path {target_path!r} must start with 'model/', 'trainer/', or 'meta/'."
             )
 
         _set_by_path(target, rel_path, value)
@@ -175,13 +182,15 @@ class BaseSearchCV(BaseCV):
         params: dict[str, Any],
     ) -> None:
         for path, value in params.items():
+            if path.startswith("meta/"):
+                continue
             if path.startswith("model/"):
                 _set_by_path(model_spec, path.removeprefix("model/"), value)
             elif path.startswith("trainer/"):
                 _set_by_path(trainer_spec, path.removeprefix("trainer/"), value)
             else:
                 raise ValueError(
-                    f"Parameter path {path!r} must start with 'model/' or 'trainer/'."
+                    f"Parameter path {path!r} must start with 'model/', 'trainer/', or 'meta/'."
                 )
 
     def _build_trainer_for_trial(

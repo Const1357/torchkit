@@ -282,6 +282,71 @@ def test_base_search_cv_routes_parameters_into_named_multitask_objectives(tmp_pa
     assert trainer.objective.objectives["reg"].weight == pytest.approx(0.15)
 
 
+def test_base_search_cv_supports_meta_tuple_presets_for_named_multitask_objectives(tmp_path):
+    model_spec = make_model_spec()
+    trainer_spec = make_trainer_spec(
+        evaluator=AccuracySelectorEvaluator(
+            score_key="clf/logits",
+            target_key="batch/y",
+            name="classification",
+        ),
+        max_epochs=2,
+    )
+    trainer_spec.objective = MultitaskObjective(
+        {
+            "clf": CELoss("clf/logits", "batch/y", weight=1.0),
+            "reg": MSELoss("reg/predictions", "batch/target", weight=0.5),
+        },
+        name="multi",
+    )
+
+    cv = MinimalBaseSearchCV(
+        model_spec=model_spec,
+        trainer_spec=trainer_spec,
+        parameter_grid=ParameterGrid(
+            suggestions={
+                "meta/objective_weights": SuggestionSpec(
+                    values=["clf85_reg15"],
+                    suggestion_type="categorical",
+                    projection_map={
+                        "clf85_reg15": (0.85, 0.15),
+                    },
+                ),
+            },
+            derived_params=[
+                DerivedParam(
+                    target_path="trainer/objective/objectives/clf/weight",
+                    args=["meta/objective_weights"],
+                    transform=lambda weights: weights[0],
+                ),
+                DerivedParam(
+                    target_path="trainer/objective/objectives/reg/weight",
+                    args=["meta/objective_weights"],
+                    transform=lambda weights: weights[1],
+                ),
+            ],
+        ),
+        splitter_cls=StratifiedKFold,
+        n_splits=2,
+        final_model_dir=str(tmp_path),
+    )
+
+    _built_model_spec, built_trainer_spec, trainer = cv._build_trainer_for_trial(
+        params={
+            "meta/objective_weights": (0.8, 0.2),
+            "trainer/objective/objectives/clf/weight": 0.8,
+            "trainer/objective/objectives/reg/weight": 0.2,
+        }
+    )
+
+    assert isinstance(built_trainer_spec.objective, MultitaskObjective)
+    assert built_trainer_spec.objective.objectives["clf"].weight == pytest.approx(0.8)
+    assert built_trainer_spec.objective.objectives["reg"].weight == pytest.approx(0.2)
+    assert isinstance(trainer.objective, MultitaskObjective)
+    assert trainer.objective.objectives["clf"].weight == pytest.approx(0.8)
+    assert trainer.objective.objectives["reg"].weight == pytest.approx(0.2)
+
+
 def test_base_search_cv_validates_projected_parameter_targets(tmp_path):
     model_spec = make_model_spec()
     trainer_spec = make_trainer_spec(

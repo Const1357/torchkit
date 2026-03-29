@@ -58,7 +58,7 @@ def test_optuna_search_cv_rejects_invalid_parameter_path(tmp_path):
         )
     )
 
-    with pytest.raises(ValueError, match="must start with 'model/' or 'trainer/'"):
+    with pytest.raises(ValueError, match="must start with 'model/', 'trainer/', or 'meta/'"):
         make_optuna_search_cv(
             model_spec=model_spec,
             trainer_spec=trainer_spec,
