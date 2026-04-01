@@ -69,6 +69,7 @@ class OptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
         _log_root_dir: Optional[str] = None,
         final_model_dir: Optional[str] = None,
         keep_final_model_state_dict_cpu: bool = True,
+        posthoc_hooks: Optional[list] = None,
     ):
         super().__init__(
             model_spec=model_spec,
@@ -87,6 +88,7 @@ class OptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
             _log_root_dir=_log_root_dir,
             final_model_dir=final_model_dir,
             keep_final_model_state_dict_cpu=keep_final_model_state_dict_cpu,
+            posthoc_hooks=posthoc_hooks,
         )
 
     def _distributed_strategy(self) -> Optional[DDPStrategy]:
@@ -736,9 +738,20 @@ class OptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
 
         holdout_metrics = None
         holdout_report_results = None
+        holdout_posthoc_results = None
         if holdout_dataset is not None:
             holdout_metrics = self._evaluate_holdout(final_trainer, holdout_dataset)
             holdout_report_results = self._evaluate_report(final_trainer, holdout_dataset)
+            holdout_posthoc_results = self._run_posthoc_hooks(
+                trainer=final_trainer,
+                fit_dataset=dataset,
+                eval_dataset=holdout_dataset,
+                stage="holdout",
+                payload={
+                    "best_trial_number": best_trial_number,
+                    "best_params": copy.deepcopy(best_params),
+                },
+            )
 
         final_model_state_dict_cpu = final_trainer._get_model_state_dict_cpu()
         final_model_state_dict_path = None
@@ -769,6 +782,7 @@ class OptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
                     "pruned_trials": pruned_trials,
                     "holdout_metrics": copy.deepcopy(holdout_metrics),
                     "holdout_report_results": copy.deepcopy(holdout_report_results),
+                    "holdout_posthoc_results": copy.deepcopy(holdout_posthoc_results),
                 },
                 message=(
                     f"OptunaSearchCV ended. Best trial={best_trial_number}, "
@@ -806,10 +820,12 @@ class OptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
             final_model_state_dict_path=final_model_state_dict_path,
             holdout_metrics=copy.deepcopy(holdout_metrics),
             holdout_report_results=copy.deepcopy(holdout_report_results),
+            holdout_posthoc_results=copy.deepcopy(holdout_posthoc_results),
             base_model_spec=copy.deepcopy(self.model_spec),
             base_trainer_spec=copy.deepcopy(self.trainer_spec),
             parameter_grid=copy.deepcopy(self.parameter_grid),
             report_evaluator=copy.deepcopy(self.report_evaluator),
+            posthoc_hooks=copy.deepcopy(self.posthoc_hooks),
             log_dir=self.log_dir,
             run_log_file=run_log_file,
             final_refit_log_file=final_refit_log_file,

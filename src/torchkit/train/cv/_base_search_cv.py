@@ -72,6 +72,7 @@ class BaseSearchCV(BaseCV):
         _log_root_dir: Optional[str] = None,
         final_model_dir: Optional[str] = None,
         keep_final_model_state_dict_cpu: bool = True,
+        posthoc_hooks: Optional[list[Callable[..., Optional[dict[str, Any]]]]] = None,
     ):
         super().__init__(
             model_spec=model_spec,
@@ -87,6 +88,7 @@ class BaseSearchCV(BaseCV):
             _log_root_dir=_log_root_dir,
             final_model_dir=final_model_dir,
             keep_final_model_state_dict_cpu=keep_final_model_state_dict_cpu,
+            posthoc_hooks=posthoc_hooks,
         )
 
         self.parameter_grid = copy.deepcopy(coerce_parameter_grid(parameter_grid))

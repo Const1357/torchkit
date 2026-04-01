@@ -50,6 +50,7 @@ class NestedOptunaSearchCV(BaseSearchCV):
         _log_root_dir: Optional[str] = None,
         final_model_dir: Optional[str] = None,
         keep_final_model_state_dict_cpu: bool = True,
+        posthoc_hooks: Optional[list] = None,
     ):
         super().__init__(
             model_spec=model_spec,
@@ -68,6 +69,7 @@ class NestedOptunaSearchCV(BaseSearchCV):
             _log_root_dir=_log_root_dir,
             final_model_dir=final_model_dir,
             keep_final_model_state_dict_cpu=keep_final_model_state_dict_cpu,
+            posthoc_hooks=posthoc_hooks,
         )
         self.outer_splitter_cls: type[KFoldSplitter] = outer_splitter_cls
         self.inner_splitter_cls: type[KFoldSplitter] = inner_splitter_cls
@@ -111,6 +113,7 @@ class NestedOptunaSearchCV(BaseSearchCV):
             ),
             final_model_dir=self._outer_fold_model_dir(outer_fold),
             keep_final_model_state_dict_cpu=self.keep_final_model_state_dict_cpu,
+            posthoc_hooks=copy.deepcopy(self.posthoc_hooks),
         )
 
     def _is_main_process(self) -> bool:
@@ -204,6 +207,7 @@ class NestedOptunaSearchCV(BaseSearchCV):
                     inner_search_result=inner_search_result,
                     outer_test_metrics=copy.deepcopy(inner_search_result.holdout_metrics),
                     outer_test_report_results=copy.deepcopy(inner_search_result.holdout_report_results),
+                    outer_test_posthoc_results=copy.deepcopy(inner_search_result.holdout_posthoc_results),
                     log_file=outer_log_file,
                 )
             )
@@ -217,6 +221,7 @@ class NestedOptunaSearchCV(BaseSearchCV):
                         "best_selection_score": inner_search_result.best_selection_score,
                         "outer_test_metrics": copy.deepcopy(inner_search_result.holdout_metrics),
                         "outer_test_report_results": copy.deepcopy(inner_search_result.holdout_report_results),
+                        "outer_test_posthoc_results": copy.deepcopy(inner_search_result.holdout_posthoc_results),
                         "inner_log_dir": inner_search_result.log_dir,
                     },
                     message=(
@@ -230,12 +235,16 @@ class NestedOptunaSearchCV(BaseSearchCV):
         outer_report_results = _aggregate_report_results(
             [outer.outer_test_report_results for outer in outer_results]
         )
+        outer_posthoc_results = _aggregate_report_results(
+            [outer.outer_test_posthoc_results for outer in outer_results]
+        )
         if run_logger is not None:
             run_logger.emit(
                 "nested_cv_run_end",
                 payload={
                     "n_outer_folds": len(outer_results),
                     "outer_report_results": copy.deepcopy(outer_report_results),
+                    "outer_posthoc_results": copy.deepcopy(outer_posthoc_results),
                 },
                 message=f"NestedOptunaSearchCV ended after {len(outer_results)} outer folds.",
             )
@@ -247,6 +256,8 @@ class NestedOptunaSearchCV(BaseSearchCV):
             parameter_grid=copy.deepcopy(self.parameter_grid),
             report_evaluator=copy.deepcopy(self.report_evaluator),
             outer_report_results=copy.deepcopy(outer_report_results),
+            outer_posthoc_results=copy.deepcopy(outer_posthoc_results),
+            posthoc_hooks=copy.deepcopy(self.posthoc_hooks),
             log_dir=self.log_dir,
             run_log_file=run_log_file,
             outer_splitter_name=self.outer_splitter_cls.__name__,

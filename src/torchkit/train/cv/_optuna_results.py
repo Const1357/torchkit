@@ -59,6 +59,16 @@ def _to_jsonable(x: Any) -> Any:
     return repr(x)
 
 
+def _flatten_metric_mapping(
+    value: Optional[dict[str, Any]],
+    *,
+    prefix: str,
+) -> dict[str, Any]:
+    if value is None:
+        return {}
+    return {f"{prefix}.{k}": v for k, v in _flatten_dict(value).items()}
+
+
 def _qualified_name(obj: Any) -> str:
     cls = obj if isinstance(obj, type) else obj.__class__
     return f"{cls.__module__}.{cls.__qualname__}"
@@ -329,12 +339,14 @@ class OptunaSearchCVResult:
 
     holdout_metrics: Optional[dict[str, Any]] = None
     holdout_report_results: Optional[dict[str, Any]] = None
+    holdout_posthoc_results: Optional[dict[str, Any]] = None
 
     # CV-level metadata
     base_model_spec: Optional[TorchkitModelSpec] = None
     base_trainer_spec: Optional[TrainerSpec] = None
     parameter_grid: Optional[ParameterGrid] = None
     report_evaluator: Optional[BundleReportEvaluator] = None
+    posthoc_hooks: Optional[list[Any]] = None
     log_dir: Optional[str] = None
     run_log_file: Optional[str] = None
     final_refit_log_file: Optional[str] = None
@@ -452,8 +464,10 @@ class OptunaSearchCVResult:
             "final_model_state_dict_path": self.final_model_state_dict_path,
             "holdout_metrics": copy.deepcopy(self.holdout_metrics),
             "holdout_report_results": copy.deepcopy(self.holdout_report_results),
+            "holdout_posthoc_results": copy.deepcopy(self.holdout_posthoc_results),
             "parameter_grid": copy.deepcopy(self.parameter_grid),
             "report_evaluator": None if self.report_evaluator is None else _snapshot_object(self.report_evaluator),
+            "posthoc_hooks": copy.deepcopy(self.posthoc_hooks),
             "log_dir": self.log_dir,
             "run_log_file": self.run_log_file,
             "final_refit_log_file": self.final_refit_log_file,
@@ -562,7 +576,9 @@ class OptunaSearchCVResult:
         }
 
         if self.holdout_metrics is not None:
-            row.update({f"holdout.{k}": v for k, v in self.holdout_metrics.items()})
+            row.update(_flatten_metric_mapping(self.holdout_metrics, prefix="holdout"))
+        if self.holdout_posthoc_results is not None:
+            row.update(_flatten_metric_mapping(self.holdout_posthoc_results, prefix="holdout_posthoc"))
 
         row.update({f"best_param.{k}": v for k, v in self.best_params.items()})
         return row
@@ -578,6 +594,7 @@ class OuterFoldResult:
     inner_search_result: OptunaSearchCVResult = field(default_factory=OptunaSearchCVResult)
     outer_test_metrics: Optional[dict[str, Any]] = None
     outer_test_report_results: Optional[dict[str, Any]] = None
+    outer_test_posthoc_results: Optional[dict[str, Any]] = None
     log_file: Optional[str] = None
 
     @property
@@ -609,6 +626,7 @@ class OuterFoldResult:
             "outer_test_indices": copy.deepcopy(self.outer_test_indices),
             "outer_test_metrics": copy.deepcopy(self.outer_test_metrics),
             "outer_test_report_results": copy.deepcopy(self.outer_test_report_results),
+            "outer_test_posthoc_results": copy.deepcopy(self.outer_test_posthoc_results),
             "log_file": self.log_file,
             "n_outer_train": len(self.outer_train_indices),
             "n_outer_test": len(self.outer_test_indices),
@@ -631,7 +649,9 @@ class OuterFoldResult:
             "n_outer_test": len(self.outer_test_indices),
         }
         if self.outer_test_metrics is not None:
-            row.update({f"outer_test.{k}": v for k, v in self.outer_test_metrics.items()})
+            row.update(_flatten_metric_mapping(self.outer_test_metrics, prefix="outer_test"))
+        if self.outer_test_posthoc_results is not None:
+            row.update(_flatten_metric_mapping(self.outer_test_posthoc_results, prefix="outer_test_posthoc"))
 
         row.update({f"inner.{k}": v for k, v in self.inner_search_result.leaderboard_row().items()})
         return row
@@ -647,6 +667,8 @@ class NestedOptunaSearchCVResult:
     parameter_grid: Optional[ParameterGrid] = None
     report_evaluator: Optional[BundleReportEvaluator] = None
     outer_report_results: Optional[dict[str, list[Any]]] = None
+    outer_posthoc_results: Optional[dict[str, list[Any]]] = None
+    posthoc_hooks: Optional[list[Any]] = None
     log_dir: Optional[str] = None
     run_log_file: Optional[str] = None
 
@@ -704,6 +726,8 @@ class NestedOptunaSearchCVResult:
             "parameter_grid": copy.deepcopy(self.parameter_grid),
             "report_evaluator": None if self.report_evaluator is None else _snapshot_object(self.report_evaluator),
             "outer_report_results": copy.deepcopy(self.outer_report_results),
+            "outer_posthoc_results": copy.deepcopy(self.outer_posthoc_results),
+            "posthoc_hooks": copy.deepcopy(self.posthoc_hooks),
             "log_dir": self.log_dir,
             "run_log_file": self.run_log_file,
             "outer_splitter_name": self.outer_splitter_name,

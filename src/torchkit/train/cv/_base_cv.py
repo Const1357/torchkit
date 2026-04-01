@@ -158,6 +158,7 @@ class BaseCV:
         _log_root_dir: Optional[str] = None,
         final_model_dir: Optional[str] = None,
         keep_final_model_state_dict_cpu: bool = True,
+        posthoc_hooks: Optional[list[Callable[..., Optional[dict[str, Any]]]]] = None,
     ):
         self.model_spec = self._coerce_model_spec(model_spec)
         self.trainer_spec = copy.deepcopy(trainer_spec)
@@ -172,6 +173,7 @@ class BaseCV:
         self.logging = bool(logging)
         self.final_model_dir = final_model_dir
         self.keep_final_model_state_dict_cpu = bool(keep_final_model_state_dict_cpu)
+        self.posthoc_hooks = list(copy.deepcopy(posthoc_hooks or []))
         if _log_root_dir is not None:
             self.log_dir = _log_root_dir
             os.makedirs(self.log_dir, exist_ok=True)
@@ -202,6 +204,43 @@ class BaseCV:
             self.dataloader_factory = lambda ds, shuffle: DataLoader(ds, batch_size=1, shuffle=shuffle)
         else:
             self.dataloader_factory = dataloader_factory
+
+    def _run_posthoc_hooks(
+        self,
+        *,
+        trainer: Trainer,
+        fit_dataset: Optional[TorchkitDataset] = None,
+        eval_dataset: Optional[TorchkitDataset] = None,
+        stage: str,
+        payload: Optional[dict[str, Any]] = None,
+    ) -> Optional[dict[str, Any]]:
+        if not self.posthoc_hooks:
+            return None
+        strategy = getattr(trainer, "distributed_strategy", None)
+        if strategy is not None and strategy.is_enabled and not strategy.is_main_process:
+            return None
+
+        results: dict[str, Any] = {}
+        for hook in self.posthoc_hooks:
+            hook_name = getattr(hook, "name", None)
+            if not isinstance(hook_name, str) or not hook_name:
+                hook_name = hook.__class__.__name__
+
+            if hook_name in results:
+                raise ValueError(f"Duplicate posthoc hook name: {hook_name!r}")
+
+            hook_result = hook(
+                trainer=trainer,
+                fit_dataset=fit_dataset,
+                eval_dataset=eval_dataset,
+                dataloader_factory=self.dataloader_factory,
+                stage=stage,
+                payload=copy.deepcopy(payload or {}),
+            )
+            if hook_result is not None:
+                results[hook_name] = hook_result
+
+        return results or None
 
     def _split(
         self,

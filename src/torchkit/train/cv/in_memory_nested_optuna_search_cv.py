@@ -34,4 +34,5 @@ class InMemoryNestedOptunaSearchCV(NestedOptunaSearchCV):
             ),
             final_model_dir=self._outer_fold_model_dir(outer_fold),
             keep_final_model_state_dict_cpu=self.keep_final_model_state_dict_cpu,
+            posthoc_hooks=copy.deepcopy(self.posthoc_hooks),
         )
