@@ -10,6 +10,7 @@ from torchkit.models._spec_utils import normalize_spec_kwargs
 class PlattScalingCalibrator(Calibrator):
     def __init__(self, init_a: float = 1.0, init_b: float = 0.0, max_iter: int = 100, lr: float = 0.01, active: bool = False):
         super().__init__(active=active)
+        init_a = max(float(init_a), 1e-6)
         self._spec_kwargs = normalize_spec_kwargs(
             {
                 "init_a": init_a,
@@ -24,10 +25,16 @@ class PlattScalingCalibrator(Calibrator):
         if lr <= 0:
             raise ValueError(f"lr must be > 0, got {lr}.")
 
-        self.a = nn.Parameter(torch.tensor([float(init_a)], dtype=torch.float32))
+        self.a = nn.Parameter(torch.tensor([init_a], dtype=torch.float32))
         self.b = nn.Parameter(torch.tensor([float(init_b)], dtype=torch.float32))
         self.max_iter = int(max_iter)
         self.lr = float(lr)
+
+    @staticmethod
+    def _positive_a(a: Tensor) -> Tensor:
+        # Keep Platt scaling monotone increasing so post-hoc calibration cannot
+        # flip score ranking and "repair" a model with inverted class order.
+        return a.clamp_min(1e-6)
 
     @staticmethod
     def _extract_binary_score(logits: Tensor) -> Tensor:
@@ -55,7 +62,7 @@ class PlattScalingCalibrator(Calibrator):
 
     def forward_impl(self, logits: Tensor) -> Tensor:
         score = self._extract_binary_score(logits)
-        calibrated_score = self.a * score + self.b
+        calibrated_score = self._positive_a(self.a) * score + self.b
         return self._restore_binary_shape(calibrated_score, logits)
 
     def fit_impl(self, logits: Tensor, targets: Tensor) -> None:
@@ -77,12 +84,14 @@ class PlattScalingCalibrator(Calibrator):
 
         def closure():
             optimizer.zero_grad()
-            calibrated_score = self.a * score + self.b
+            calibrated_score = self._positive_a(self.a) * score + self.b
             loss = criterion(calibrated_score, targets)
             loss.backward()
             return loss
 
         optimizer.step(closure)
+        with torch.no_grad():
+            self.a.clamp_(min=1e-6)
 
     def to_spec(self):
         return super().to_spec()

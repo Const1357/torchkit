@@ -142,24 +142,24 @@ class ClassificationReportEvaluator(CalibratedLogitsFallbackMixin, ReportEvaluat
         accuracy = (preds == targets).float().mean()
         balanced_accuracy = recall.mean()
 
-        pr_points = 100
-        thresholds = torch.linspace(0, 1, pr_points, device=device)
-
-        pr_curve_precision = torch.zeros(pr_points, device=device, dtype=dtype)
-        pr_curve_recall = torch.zeros(pr_points, device=device, dtype=dtype)
-
         if c == 2:
+            from sklearn.metrics import average_precision_score, precision_recall_curve
+
             pos_probs = probs[:, 1]
-            for i, thr in enumerate(thresholds):
-                pred_pos = pos_probs >= thr
-                tp_t = ((pred_pos) & (targets == 1)).sum().to(dtype)
-                fp_t = ((pred_pos) & (targets == 0)).sum().to(dtype)
-                fn_t = ((~pred_pos) & (targets == 1)).sum().to(dtype)
-
-                pr_curve_precision[i] = tp_t / (tp_t + fp_t + eps)
-                pr_curve_recall[i] = tp_t / (tp_t + fn_t + eps)
-
-            pr_auc = torch.trapz(pr_curve_precision, pr_curve_recall)
+            targets_np = targets.detach().cpu().numpy()
+            pos_probs_np = pos_probs.detach().cpu().numpy()
+            pr_curve_precision_np, pr_curve_recall_np, thresholds_np = precision_recall_curve(
+                targets_np,
+                pos_probs_np,
+            )
+            pr_curve_precision = torch.as_tensor(pr_curve_precision_np.copy(), device=device, dtype=dtype)
+            pr_curve_recall = torch.as_tensor(pr_curve_recall_np.copy(), device=device, dtype=dtype)
+            thresholds = torch.as_tensor(thresholds_np.copy(), device=device, dtype=dtype)
+            pr_auc = torch.tensor(
+                float(average_precision_score(targets_np, pos_probs_np)),
+                device=device,
+                dtype=dtype,
+            )
         else:
             pr_auc = torch.tensor(0.0, device=device, dtype=dtype)
 

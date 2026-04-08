@@ -184,7 +184,7 @@ def test_calibration_report_and_selector_match_manual(binary_inputs: dict[str, o
     metrics = report(inputs=binary_inputs)
     selector_value = float(selector(inputs=binary_inputs))
 
-    probs = torch.softmax(binary_inputs["clf"]["probabilities"], dim=1)[:, 1]  # type: ignore[index]
+    probs = binary_inputs["clf"]["probabilities"][:, 1]  # type: ignore[index]
     targets = binary_inputs["batch"]["y"]  # type: ignore[index]
     expected_brier = float(torch.mean((probs - targets.float()) ** 2))
     expected_ece, expected_mce = _ece_and_mce(probs, targets, n_bins)
@@ -228,7 +228,7 @@ def test_roc_report_and_selector_match_manual(binary_inputs: dict[str, object]) 
     metrics = report(inputs=binary_inputs)
     selector_value = float(selector(inputs=binary_inputs))
 
-    probs = torch.softmax(binary_inputs["clf"]["probabilities"], dim=1)[:, 1]  # type: ignore[index]
+    probs = binary_inputs["clf"]["probabilities"][:, 1]  # type: ignore[index]
     targets = binary_inputs["batch"]["y"]  # type: ignore[index]
     pos_scores = probs[targets == 1]
     neg_scores = probs[targets == 0]
@@ -248,7 +248,7 @@ def test_binary_pr_auc_selector_matches_sklearn(binary_inputs: dict[str, object]
 
     selector_value = float(selector(inputs=binary_inputs))
 
-    probs = torch.softmax(binary_inputs["clf"]["probabilities"], dim=1)[:, 1]  # type: ignore[index]
+    probs = binary_inputs["clf"]["probabilities"][:, 1]  # type: ignore[index]
     targets = binary_inputs["batch"]["y"]  # type: ignore[index]
     expected = average_precision_score(
         targets.detach().cpu().numpy(),
@@ -267,7 +267,7 @@ def test_roc_auc_selector_matches_sklearn(binary_inputs: dict[str, object]) -> N
 
     selector_value = float(selector(inputs=binary_inputs))
 
-    probs = torch.softmax(binary_inputs["clf"]["probabilities"], dim=1)[:, 1]  # type: ignore[index]
+    probs = binary_inputs["clf"]["probabilities"][:, 1]  # type: ignore[index]
     targets = binary_inputs["batch"]["y"]  # type: ignore[index]
     expected = roc_auc_score(
         targets.detach().cpu().numpy(),
@@ -295,7 +295,7 @@ def test_dca_report_and_selector_match_manual(binary_inputs: dict[str, object]) 
     metrics = report(inputs=binary_inputs)
     selector_value = float(selector(inputs=binary_inputs))
 
-    probs = torch.softmax(binary_inputs["clf"]["probabilities"], dim=1)[:, 1]  # type: ignore[index]
+    probs = binary_inputs["clf"]["probabilities"][:, 1]  # type: ignore[index]
     targets = binary_inputs["batch"]["y"].float()  # type: ignore[index]
     thresholds = torch.linspace(0.01, 0.99, n_thresholds)
     curve = []
@@ -308,6 +308,26 @@ def test_dca_report_and_selector_match_manual(binary_inputs: dict[str, object]) 
     assert metrics["max_net_benefit"] == pytest.approx(max(curve))
     assert metrics["net_benefit_mean"] == pytest.approx(sum(curve) / len(curve))
     assert selector_value == pytest.approx(max(curve))
+
+
+def test_classification_pr_auc_is_non_negative_and_matches_sklearn(binary_inputs: dict[str, object]) -> None:
+    report = ClassificationReportEvaluator(
+        score_key="clf/logits",
+        target_key="batch/y",
+        probabilities_key="clf/probabilities",
+    )
+
+    metrics = report(inputs=binary_inputs)
+
+    probs = binary_inputs["clf"]["probabilities"][:, 1]  # type: ignore[index]
+    targets = binary_inputs["batch"]["y"]  # type: ignore[index]
+    expected = average_precision_score(
+        targets.detach().cpu().numpy(),
+        probs.detach().cpu().numpy(),
+    )
+
+    assert metrics["pr_auc"] >= 0.0
+    assert metrics["pr_auc"] == pytest.approx(expected)
 
 
 def test_segmentation_reports_and_selectors_match(seg2d_inputs: dict[str, object], seg3d_inputs: dict[str, object]) -> None:

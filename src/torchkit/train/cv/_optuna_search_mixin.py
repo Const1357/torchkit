@@ -287,4 +287,11 @@ class OptunaSearchMixin:
         Selection scores are always maximized. Raw metrics are converted into
         selection scores via BaseCV._to_selection_score(...).
         """
-        return optuna.create_study(direction="maximize")
+        return optuna.create_study(
+            direction="maximize",
+            pruner=optuna.pruners.MedianPruner(
+                n_startup_trials=2,
+                n_warmup_steps=5,
+                interval_steps=1,
+            ),
+        )

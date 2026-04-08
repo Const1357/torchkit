@@ -3,7 +3,11 @@ from __future__ import annotations
 from typing import Any, Optional
 
 import copy
+import json
 import os
+from pathlib import Path
+
+import torch
 
 from torchkit.data._dataset import DatasetSplit, TorchkitDataset
 from torchkit.data.split import KFoldSplitter
@@ -13,7 +17,10 @@ from torchkit.train.cv._base_cv import _aggregate_report_results, _resolve_origi
 from torchkit.train.cv._base_search_cv import BaseSearchCV
 from torchkit.train.cv._optuna_results import (
     NestedOptunaSearchCVResult,
+    OptunaSearchCVResult,
     OuterFoldResult,
+    _snapshot_object,
+    _to_jsonable,
 )
 from torchkit.train.cv._optuna_search_mixin import ParameterGrid
 from torchkit.train.cv.optuna_search_cv import OptunaSearchCV
@@ -116,6 +123,130 @@ class NestedOptunaSearchCV(BaseSearchCV):
             posthoc_hooks=copy.deepcopy(self.posthoc_hooks),
         )
 
+    @staticmethod
+    def _write_json(path: str, payload: dict[str, Any]) -> None:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(
+            json.dumps(_to_jsonable(payload), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    def _persist_outer_fold_artifacts(
+        self,
+        *,
+        outer_fold: int,
+        inner_search_result: OptunaSearchCVResult,
+        outer_train_indices: list[int],
+        outer_test_indices: list[int],
+    ) -> dict[str, Optional[str]]:
+        if not self._is_main_process():
+            return {
+                "selected_trial_summary_path": None,
+                "refit_summary_path": None,
+            }
+
+        selected_summary_path = None
+        refit_summary_path = None
+
+        outer_fold_log_dir = (
+            os.path.join(self.log_dir, "outer_folds", f"outer_fold_{outer_fold:03d}")
+            if self.log_dir is not None
+            else None
+        )
+        outer_fold_model_dir = self._outer_fold_model_dir(outer_fold)
+
+        selected_trial = inner_search_result.selected_trial_result()
+        selected_fold_artifacts: list[dict[str, Any]] = []
+
+        selected_ckpt_dir = None
+        if outer_fold_model_dir is not None:
+            selected_ckpt_dir = os.path.join(outer_fold_model_dir, "selected_trial")
+            os.makedirs(selected_ckpt_dir, exist_ok=True)
+
+        for fold_result in selected_trial.fold_results:
+            checkpoint_path = None
+            if selected_ckpt_dir is not None and fold_result.best_state_dict_cpu is not None:
+                checkpoint_path = os.path.join(
+                    selected_ckpt_dir,
+                    f"trial_{selected_trial.trial_number:03d}_fold_{fold_result.fold:03d}_best_model.pt",
+                )
+                torch.save(fold_result.best_state_dict_cpu, checkpoint_path)
+
+            selected_fold_artifacts.append(
+                {
+                    "fold": fold_result.fold,
+                    "train_indices": copy.deepcopy(fold_result.train_indices),
+                    "val_indices": copy.deepcopy(fold_result.val_indices),
+                    "best_metric": fold_result.best_metric,
+                    "best_epoch": fold_result.best_epoch,
+                    "report_results": copy.deepcopy(fold_result.report_results),
+                    "trainer_log_file": fold_result.log_file,
+                    "checkpoint_path": checkpoint_path,
+                }
+            )
+
+        selected_summary = {
+            "artifact_type": "selected_trial_summary",
+            "outer_fold": outer_fold,
+            "status": "outer_fold_completed",
+            "best_trial_number": inner_search_result.best_trial_number,
+            "best_params": copy.deepcopy(inner_search_result.best_params),
+            "best_metric": inner_search_result.best_metric,
+            "best_selection_score": inner_search_result.best_selection_score,
+            "selected_metric_mean": inner_search_result.selected_metric_mean,
+            "selected_metric_std": inner_search_result.selected_metric_std,
+            "selected_metric_min": inner_search_result.selected_metric_min,
+            "selected_metric_max": inner_search_result.selected_metric_max,
+            "search_pool_indices": copy.deepcopy(inner_search_result.search_pool_indices),
+            "outer_train_indices": copy.deepcopy(outer_train_indices),
+            "outer_test_indices": copy.deepcopy(outer_test_indices),
+            "trial_log_file": selected_trial.log_file,
+            "search_log_file": inner_search_result.run_log_file,
+            "selected_fold_report_results": copy.deepcopy(inner_search_result.selected_fold_report_results),
+            "selected_folds": selected_fold_artifacts,
+            "base_model_spec": _snapshot_object(copy.deepcopy(inner_search_result.base_model_spec)),
+            "base_trainer_spec": _snapshot_object(copy.deepcopy(inner_search_result.base_trainer_spec)),
+            "parameter_grid": copy.deepcopy(inner_search_result.parameter_grid),
+            "selection_metric_name": inner_search_result.selection_metric_name,
+            "selection_metric_direction": inner_search_result.selection_metric_direction,
+            "selection_metric_spec": copy.deepcopy(inner_search_result.selection_metric_spec),
+        }
+
+        refit_summary = {
+            "artifact_type": "refit_summary",
+            "outer_fold": outer_fold,
+            "status": "outer_fold_completed",
+            "best_trial_number": inner_search_result.best_trial_number,
+            "best_params": copy.deepcopy(inner_search_result.best_params),
+            "final_model_state_dict_path": inner_search_result.final_model_state_dict_path,
+            "final_refit_log_file": inner_search_result.final_refit_log_file,
+            "search_log_file": inner_search_result.run_log_file,
+            "outer_train_indices": copy.deepcopy(outer_train_indices),
+            "outer_test_indices": copy.deepcopy(outer_test_indices),
+            "final_fit_epochs": inner_search_result.final_fit_epochs,
+            "final_epochs_ran": inner_search_result.final_epochs_ran,
+            "final_best_epoch": inner_search_result.final_best_epoch,
+            "final_best_metric": inner_search_result.final_best_metric,
+            "holdout_metrics": copy.deepcopy(inner_search_result.holdout_metrics),
+            "holdout_report_results": copy.deepcopy(inner_search_result.holdout_report_results),
+            "holdout_posthoc_results": copy.deepcopy(inner_search_result.holdout_posthoc_results),
+            "final_model_spec": _snapshot_object(copy.deepcopy(inner_search_result.final_model_spec)),
+            "final_trainer_spec": _snapshot_object(copy.deepcopy(inner_search_result.final_trainer_spec)),
+            "base_model_spec": _snapshot_object(copy.deepcopy(inner_search_result.base_model_spec)),
+            "base_trainer_spec": _snapshot_object(copy.deepcopy(inner_search_result.base_trainer_spec)),
+        }
+
+        if outer_fold_log_dir is not None:
+            selected_summary_path = os.path.join(outer_fold_log_dir, "selected_trial_summary.json")
+            refit_summary_path = os.path.join(outer_fold_log_dir, "refit_summary.json")
+            self._write_json(selected_summary_path, selected_summary)
+            self._write_json(refit_summary_path, refit_summary)
+
+        return {
+            "selected_trial_summary_path": selected_summary_path,
+            "refit_summary_path": refit_summary_path,
+        }
+
     def _is_main_process(self) -> bool:
         strategy = getattr(self.trainer_spec, "distributed_strategy", None)
         if strategy is None or not strategy.is_enabled:
@@ -198,6 +329,12 @@ class NestedOptunaSearchCV(BaseSearchCV):
                 groups=groups,
                 holdout_dataset=outer_test_dataset,
             )
+            artifact_paths = self._persist_outer_fold_artifacts(
+                outer_fold=outer_fold,
+                inner_search_result=inner_search_result,
+                outer_train_indices=outer_train_indices,
+                outer_test_indices=outer_test_indices,
+            )
 
             outer_results.append(
                 OuterFoldResult(
@@ -223,6 +360,9 @@ class NestedOptunaSearchCV(BaseSearchCV):
                         "outer_test_report_results": copy.deepcopy(inner_search_result.holdout_report_results),
                         "outer_test_posthoc_results": copy.deepcopy(inner_search_result.holdout_posthoc_results),
                         "inner_log_dir": inner_search_result.log_dir,
+                        "selected_trial_summary_path": artifact_paths["selected_trial_summary_path"],
+                        "refit_summary_path": artifact_paths["refit_summary_path"],
+                        "final_model_state_dict_path": inner_search_result.final_model_state_dict_path,
                     },
                     message=(
                         f"Outer fold {outer_fold} ended. "

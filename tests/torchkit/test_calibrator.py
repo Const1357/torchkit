@@ -182,8 +182,24 @@ def test_platt_scaling_fit_runs_for_supported_binary_shapes(
 
     assert cal.a.numel() == 1
     assert cal.b.numel() == 1
+    assert float(cal.a.item()) > 0.0
     assert torch.isfinite(cal.a).all()
     assert torch.isfinite(cal.b).all()
+
+
+def test_platt_scaling_forward_remains_monotone_when_parameter_is_negative(binary_logits_n: torch.Tensor):
+    cal = PlattScalingCalibrator(active=True)
+    with torch.no_grad():
+        cal.a.fill_(-3.0)
+        cal.b.fill_(0.25)
+
+    out = cal(binary_logits_n)
+    sorted_in = torch.argsort(binary_logits_n)
+    sorted_out = out[sorted_in]
+
+    assert out.shape == binary_logits_n.shape
+    assert torch.isfinite(out).all()
+    assert torch.all(torch.diff(sorted_out) >= 0.0)
 
 
 def test_platt_scaling_rejects_non_binary_targets(binary_logits_n2: torch.Tensor):

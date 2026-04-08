@@ -1,5 +1,7 @@
 from __future__ import annotations
+import gc
 import os
+import json
 
 from typing import Any, Optional
 
@@ -103,6 +105,35 @@ class OptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
             return True
         return strategy.is_main_process
 
+    @staticmethod
+    def _cleanup_cuda_cache() -> None:
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            if hasattr(torch.cuda, "ipc_collect"):
+                torch.cuda.ipc_collect()
+
+    @classmethod
+    def _release_trainer_resources(cls, trainer: Trainer | None) -> None:
+        if trainer is None:
+            return
+        trainer._set_event_logger(None)
+        trainer.history.clear()
+        trainer.state.oof_logits.clear()
+        trainer.state.oof_targets.clear()
+        trainer.state.train_logs.clear()
+        trainer.state.val_logs.clear()
+        trainer.state.best_state_dict_cpu = None
+        try:
+            trainer._fit_model = trainer.model
+            trainer.model.to("cpu")
+        except Exception:
+            pass
+        trainer.optimizer = None  # type: ignore[assignment]
+        trainer.scheduler = None
+        trainer._scaler = None
+        cls._cleanup_cuda_cache()
+
     def _run_single_trial_with_params(
         self,
         *,
@@ -118,167 +149,174 @@ class OptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
         _, _, trainer = self._build_trainer_for_trial(params=params)
         trial_logger = None
         trial_log_file = None
-        if self.logging and self.log_dir is not None and self._is_main_process():
-            trial_log_file = os.path.join(self.log_dir, "trials", f"trial_{trial_number:03d}.log.jsonl")
-            trial_logger = JsonlEventLogger(
-                trial_log_file,
-                scope="optuna_trial",
-                echo_console=True,
-                context={"trial_number": trial_number},
-            )
-            trial_logger.emit(
-                "cv_trial_start",
-                payload={"trial_number": trial_number, "params": copy.deepcopy(params)},
-                message=f"Trial {trial_number} started. Logging to {trial_log_file}.",
-            )
-
-        fold_results: list[FoldResult] = []
-        fold_metrics: list[float] = []
-        fold_selection_scores: list[float] = []
-        fold_report_results_all: list[Optional[dict[str, Any]]] = []
-
-        fold_oof_logits_all: list[dict[str, torch.Tensor]] = []
-        fold_oof_targets_all: list[dict[str, torch.Tensor]] = []
-        aggregate_oof_sample_indices: list[int] = []
-
-        for fold, (train_subset, val_subset) in enumerate(
-            self._split(self.splitter, search_dataset, search_index, search_groups)
-        ):
-            train_original_indices = _resolve_original_indices_for_subset(train_subset)
-            val_original_indices = _resolve_original_indices_for_subset(val_subset)
-
-            train_loader = self.dataloader_factory(train_subset, True)
-            val_loader = self.dataloader_factory(val_subset, False)
-            fold_log_file = None
-            if trial_logger is not None and self.log_dir is not None:
+        try:
+            if self.logging and self.log_dir is not None and self._is_main_process():
+                trial_log_file = os.path.join(self.log_dir, "trials", f"trial_{trial_number:03d}.log.jsonl")
+                trial_logger = JsonlEventLogger(
+                    trial_log_file,
+                    scope="optuna_trial",
+                    echo_console=True,
+                    context={"trial_number": trial_number},
+                )
                 trial_logger.emit(
-                    "cv_fold_start",
-                    payload={
-                        "fold": fold,
-                        "n_train": len(train_original_indices),
-                        "n_val": len(val_original_indices),
-                    },
+                    "cv_trial_start",
+                    payload={"trial_number": trial_number, "params": copy.deepcopy(params)},
                     message=(
-                        f"Trial {trial_number} fold {fold} started "
-                        f"(n_train={len(train_original_indices)}, n_val={len(val_original_indices)})."
+                        f"Trial {trial_number} started with params "
+                        f"{json.dumps(params, sort_keys=True)}. "
+                        f"Logging to {trial_log_file}."
                     ),
                 )
-                fold_log_file = os.path.join(
-                    self.log_dir,
-                    "trials",
-                    f"trial_{trial_number:03d}_fold_{fold:03d}_trainer.log.jsonl",
-                )
-                trainer._set_event_logger(
-                    JsonlEventLogger(
-                        fold_log_file,
-                        scope="trainer",
-                        echo_console=True,
-                        context={"trial_number": trial_number, "fold": fold},
+
+            fold_results: list[FoldResult] = []
+            fold_metrics: list[float] = []
+            fold_selection_scores: list[float] = []
+            fold_report_results_all: list[Optional[dict[str, Any]]] = []
+
+            fold_oof_logits_all: list[dict[str, torch.Tensor]] = []
+            fold_oof_targets_all: list[dict[str, torch.Tensor]] = []
+            aggregate_oof_sample_indices: list[int] = []
+
+            for fold, (train_subset, val_subset) in enumerate(
+                self._split(self.splitter, search_dataset, search_index, search_groups)
+            ):
+                train_original_indices = _resolve_original_indices_for_subset(train_subset)
+                val_original_indices = _resolve_original_indices_for_subset(val_subset)
+
+                train_loader = self.dataloader_factory(train_subset, True)
+                val_loader = self.dataloader_factory(val_subset, False)
+                fold_log_file = None
+                if trial_logger is not None and self.log_dir is not None:
+                    trial_logger.emit(
+                        "cv_fold_start",
+                        payload={
+                            "fold": fold,
+                            "n_train": len(train_original_indices),
+                            "n_val": len(val_original_indices),
+                        },
+                        message=(
+                            f"Trial {trial_number} fold {fold} started "
+                            f"(n_train={len(train_original_indices)}, n_val={len(val_original_indices)})."
+                        ),
                     )
+                    fold_log_file = os.path.join(
+                        self.log_dir,
+                        "trials",
+                        f"trial_{trial_number:03d}_fold_{fold:03d}_trainer.log.jsonl",
+                    )
+                    trainer._set_event_logger(
+                        JsonlEventLogger(
+                            fold_log_file,
+                            scope="trainer",
+                            echo_console=True,
+                            context={"trial_number": trial_number, "fold": fold},
+                        )
+                    )
+
+                trainer.reset_state()
+                trainer.fit(
+                    train_loader,
+                    val_loader,
+                    trial=None,
                 )
 
-            trainer.reset_state()
-            trainer.fit(
-                train_loader,
-                val_loader,
-                trial=None,
+                fold_report_results = self._evaluate_report(trainer, val_subset)
+
+                metric = trainer.state.best_metric
+                if metric is not None:
+                    metric = float(metric)
+
+                fold_result = FoldResult(
+                    fold=fold,
+                    train_indices=copy.deepcopy(train_original_indices),
+                    val_indices=copy.deepcopy(val_original_indices),
+                    best_metric=metric,
+                    best_epoch=trainer.state.best_epoch,
+                    best_state_dict_cpu=_clone_state_dict_cpu(trainer.state.best_state_dict_cpu),
+                    oof_logits=_clone_tensor_dict(trainer.state.oof_logits),
+                    oof_targets=_clone_tensor_dict(trainer.state.oof_targets),
+                    oof_sample_indices=copy.deepcopy(val_original_indices),
+                    report_results=copy.deepcopy(fold_report_results),
+                    log_file=fold_log_file,
+                )
+                fold_results.append(fold_result)
+                fold_report_results_all.append(copy.deepcopy(fold_report_results))
+                if trial_logger is not None:
+                    trial_logger.emit(
+                        "cv_fold_end",
+                        payload={
+                            "fold": fold,
+                            "best_epoch": trainer.state.best_epoch,
+                            "best_metric": trainer.state.best_metric,
+                            "selection_score": None if metric is None else self._to_selection_score(metric),
+                            "log_file": fold_log_file,
+                        },
+                        message=(
+                            f"Trial {trial_number} fold {fold} ended. "
+                            f"best_epoch={trainer.state.best_epoch}, best_metric={metric}, "
+                            f"trainer_log={fold_log_file}."
+                        ),
+                    )
+
+                if metric is not None:
+                    fold_metrics.append(metric)
+                    fold_selection_scores.append(self._to_selection_score(metric))
+
+                if trainer.state.oof_logits:
+                    fold_oof_logits_all.append(_clone_tensor_dict(trainer.state.oof_logits))
+                if trainer.state.oof_targets:
+                    fold_oof_targets_all.append(_clone_tensor_dict(trainer.state.oof_targets))
+                if trainer.state.oof_logits or trainer.state.oof_targets:
+                    aggregate_oof_sample_indices.extend(val_original_indices)
+
+            if len(fold_metrics) == 0:
+                raise ValueError(f"Trial {trial_number} produced no valid fold metrics.")
+
+            aggregate_metric = sum(fold_metrics) / len(fold_metrics)
+            aggregate_selection_score = sum(fold_selection_scores) / len(fold_selection_scores)
+
+            aggregate_oof_logits = _concat_tensor_dicts(fold_oof_logits_all) if fold_oof_logits_all else {}
+            aggregate_oof_targets = _concat_tensor_dicts(fold_oof_targets_all) if fold_oof_targets_all else {}
+
+            self._assert_exact_oof_coverage(
+                sample_indices=aggregate_oof_sample_indices,
+                reference_indices=search_original_indices,
+                context=f"Trial {trial_number}",
             )
 
-            fold_report_results = self._evaluate_report(trainer, val_subset)
-
-            metric = trainer.state.best_metric
-            if metric is not None:
-                metric = float(metric)
-
-            fold_result = FoldResult(
-                fold=fold,
-                train_indices=copy.deepcopy(train_original_indices),
-                val_indices=copy.deepcopy(val_original_indices),
-                best_metric=metric,
-                best_epoch=trainer.state.best_epoch,
-                best_state_dict_cpu=_clone_state_dict_cpu(trainer.state.best_state_dict_cpu),
-                oof_logits=_clone_tensor_dict(trainer.state.oof_logits),
-                oof_targets=_clone_tensor_dict(trainer.state.oof_targets),
-                oof_sample_indices=copy.deepcopy(val_original_indices),
-                report_results=copy.deepcopy(fold_report_results),
-                log_file=fold_log_file,
+            trial_result = OptunaTrialResult(
+                trial_number=trial_number,
+                params=copy.deepcopy(params),
+                status="SUCCESS",
+                aggregate_metric=float(aggregate_metric),
+                aggregate_selection_score=float(aggregate_selection_score),
+                fold_results=fold_results,
+                aggregate_fold_report_results=_aggregate_report_results(fold_report_results_all),
+                log_file=trial_log_file,
+                aggregate_oof_logits=aggregate_oof_logits,
+                aggregate_oof_targets=aggregate_oof_targets,
+                aggregate_oof_sample_indices=copy.deepcopy(aggregate_oof_sample_indices),
+                error_message=None,
+                error_traceback=None,
             )
-            fold_results.append(fold_result)
-            fold_report_results_all.append(copy.deepcopy(fold_report_results))
             if trial_logger is not None:
                 trial_logger.emit(
-                    "cv_fold_end",
+                    "cv_trial_end",
                     payload={
-                        "fold": fold,
-                        "best_epoch": trainer.state.best_epoch,
-                        "best_metric": trainer.state.best_metric,
-                        "selection_score": None if metric is None else self._to_selection_score(metric),
-                        "log_file": fold_log_file,
+                        "trial_number": trial_number,
+                        "status": "SUCCESS",
+                        "aggregate_metric": aggregate_metric,
+                        "aggregate_selection_score": aggregate_selection_score,
                     },
                     message=(
-                        f"Trial {trial_number} fold {fold} ended. "
-                        f"best_epoch={trainer.state.best_epoch}, best_metric={metric}, "
-                        f"trainer_log={fold_log_file}."
+                        f"Trial {trial_number} ended successfully. "
+                        f"aggregate_metric={aggregate_metric:.6f}, "
+                        f"aggregate_selection_score={aggregate_selection_score:.6f}."
                     ),
                 )
-
-            if metric is not None:
-                fold_metrics.append(metric)
-                fold_selection_scores.append(self._to_selection_score(metric))
-
-            if trainer.state.oof_logits:
-                fold_oof_logits_all.append(_clone_tensor_dict(trainer.state.oof_logits))
-            if trainer.state.oof_targets:
-                fold_oof_targets_all.append(_clone_tensor_dict(trainer.state.oof_targets))
-            if trainer.state.oof_logits or trainer.state.oof_targets:
-                aggregate_oof_sample_indices.extend(val_original_indices)
-
-        if len(fold_metrics) == 0:
-            raise ValueError(f"Trial {trial_number} produced no valid fold metrics.")
-
-        aggregate_metric = sum(fold_metrics) / len(fold_metrics)
-        aggregate_selection_score = sum(fold_selection_scores) / len(fold_selection_scores)
-
-        aggregate_oof_logits = _concat_tensor_dicts(fold_oof_logits_all) if fold_oof_logits_all else {}
-        aggregate_oof_targets = _concat_tensor_dicts(fold_oof_targets_all) if fold_oof_targets_all else {}
-
-        self._assert_exact_oof_coverage(
-            sample_indices=aggregate_oof_sample_indices,
-            reference_indices=search_original_indices,
-            context=f"Trial {trial_number}",
-        )
-
-        trial_result = OptunaTrialResult(
-            trial_number=trial_number,
-            params=copy.deepcopy(params),
-            status="SUCCESS",
-            aggregate_metric=float(aggregate_metric),
-            aggregate_selection_score=float(aggregate_selection_score),
-            fold_results=fold_results,
-            aggregate_fold_report_results=_aggregate_report_results(fold_report_results_all),
-            log_file=trial_log_file,
-            aggregate_oof_logits=aggregate_oof_logits,
-            aggregate_oof_targets=aggregate_oof_targets,
-            aggregate_oof_sample_indices=copy.deepcopy(aggregate_oof_sample_indices),
-            error_message=None,
-            error_traceback=None,
-        )
-        if trial_logger is not None:
-            trial_logger.emit(
-                "cv_trial_end",
-                payload={
-                    "trial_number": trial_number,
-                    "status": "SUCCESS",
-                    "aggregate_metric": aggregate_metric,
-                    "aggregate_selection_score": aggregate_selection_score,
-                },
-                message=(
-                    f"Trial {trial_number} ended successfully. "
-                    f"aggregate_metric={aggregate_metric:.6f}, "
-                    f"aggregate_selection_score={aggregate_selection_score:.6f}."
-                ),
-            )
-        return trial_result
+            return trial_result
+        finally:
+            self._release_trainer_resources(trainer)
 
     def _run_single_trial(
         self,

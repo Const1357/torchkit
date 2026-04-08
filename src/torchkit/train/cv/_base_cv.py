@@ -177,7 +177,7 @@ class BaseCV:
         if _log_root_dir is not None:
             self.log_dir = _log_root_dir
             os.makedirs(self.log_dir, exist_ok=True)
-        elif self.logging:
+        elif self.logging and self._should_create_log_dir():
             self.log_dir = default_log_dir(
                 prefix=self.__class__.__name__.lower(),
                 base_dir=self.final_model_dir,
@@ -204,6 +204,12 @@ class BaseCV:
             self.dataloader_factory = lambda ds, shuffle: DataLoader(ds, batch_size=1, shuffle=shuffle)
         else:
             self.dataloader_factory = dataloader_factory
+
+    def _should_create_log_dir(self) -> bool:
+        strategy = getattr(self.trainer_spec, "distributed_strategy", None)
+        if strategy is None or not getattr(strategy, "is_enabled", False):
+            return True
+        return bool(getattr(strategy, "is_main_process", False))
 
     def _run_posthoc_hooks(
         self,

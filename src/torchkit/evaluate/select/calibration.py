@@ -46,6 +46,18 @@ class _CalibrationSelectorBase(CalibratedLogitsFallbackMixin, SelectorEvaluator)
             f"Expected binary scores/probabilities of shape (N,), (N,1), or (N,2), got {tuple(x.shape)}."
         )
 
+    @staticmethod
+    def _positive_probability_from_probabilities(x: Tensor) -> Tensor:
+        if x.ndim == 2 and x.shape[1] == 2:
+            return x[:, 1]
+        if x.ndim == 2 and x.shape[1] == 1:
+            return x[:, 0]
+        if x.ndim == 1:
+            return x
+        raise ValueError(
+            f"Expected binary probabilities of shape (N,), (N,1), or (N,2), got {tuple(x.shape)}."
+        )
+
     def _probs_and_targets(self, inputs: dict[str, Any]) -> tuple[Tensor, Tensor]:
         scores = self._resolve_score_tensor(inputs)
         targets = self.resolve(inputs, self.target_key).detach()
@@ -55,7 +67,7 @@ class _CalibrationSelectorBase(CalibratedLogitsFallbackMixin, SelectorEvaluator)
 
         if self.probabilities_key is not None:
             probs_tensor = self.resolve(inputs, self.probabilities_key).detach()
-            probs = self._binary_positive_probability(probs_tensor)
+            probs = self._positive_probability_from_probabilities(probs_tensor)
         else:
             probs = self._binary_positive_probability(scores)
 

@@ -59,6 +59,18 @@ class CalibrationReportEvaluator(CalibratedLogitsFallbackMixin, ReportEvaluator)
             f"Expected binary scores/probabilities of shape (N,), (N,1), or (N,2), got {tuple(x.shape)}."
         )
 
+    @staticmethod
+    def _positive_probability_from_probabilities(x: torch.Tensor) -> torch.Tensor:
+        if x.ndim == 2 and x.shape[1] == 2:
+            return x[:, 1]
+        if x.ndim == 2 and x.shape[1] == 1:
+            return x[:, 0]
+        if x.ndim == 1:
+            return x
+        raise ValueError(
+            f"Expected binary probabilities of shape (N,), (N,1), or (N,2), got {tuple(x.shape)}."
+        )
+
     def metrics(self, *, inputs: dict[str, Any]) -> dict[str, Any]:
         scores = self._resolve_score_tensor(inputs)
         targets = self.resolve(inputs, self.target_key).detach()
@@ -68,7 +80,7 @@ class CalibrationReportEvaluator(CalibratedLogitsFallbackMixin, ReportEvaluator)
 
         if self.probabilities_key is not None:
             probs_tensor = self.resolve(inputs, self.probabilities_key).detach()
-            probs = self._binary_positive_probability(probs_tensor)
+            probs = self._positive_probability_from_probabilities(probs_tensor)
         else:
             probs = self._binary_positive_probability(scores)
 

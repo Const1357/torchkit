@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Iterator, Optional
 
 import copy
+import json
 import os
 import statistics
 
@@ -27,7 +28,7 @@ from torchkit.train.trainer import EpochResult, Trainer
 @dataclass
 class _LiveFoldRunner:
     fold: int
-    trainer: Trainer
+    trainer: Optional[Trainer]
     val_subset: Any
     train_indices: list[int]
     val_indices: list[int]
@@ -36,6 +37,7 @@ class _LiveFoldRunner:
     completed: bool = False
     last_event: Optional[EpochResult] = None
     last_selection_score: Optional[float] = None
+    fold_result: Optional[FoldResult] = None
 
 
 class _PrunedTrialWithResult(optuna.TrialPruned):
@@ -120,8 +122,19 @@ class InMemoryOptunaSearchCV(OptunaSearchCV):
 
         return live_folds
 
+    def _release_live_folds(self, live_folds: list[_LiveFoldRunner]) -> None:
+        for fold_runner in live_folds:
+            self._release_trainer_resources(fold_runner.trainer)
+            fold_runner.trainer = None
+            fold_runner.iterator = iter(())
+            fold_runner.last_event = None
+        live_folds.clear()
+        self._cleanup_cuda_cache()
+
     def _collect_fold_result(self, *, fold_runner: _LiveFoldRunner) -> FoldResult:
         trainer = fold_runner.trainer
+        if trainer is None:
+            raise RuntimeError(f"Fold {fold_runner.fold} trainer has already been released.")
         fold_report_results = self._evaluate_report(trainer, fold_runner.val_subset)
         metric = trainer.state.best_metric
         if metric is not None:
@@ -141,6 +154,17 @@ class InMemoryOptunaSearchCV(OptunaSearchCV):
             log_file=fold_runner.log_file,
         )
 
+    def _materialize_fold_result(self, *, fold_runner: _LiveFoldRunner) -> FoldResult:
+        if fold_runner.fold_result is None:
+            fold_runner.fold_result = self._collect_fold_result(fold_runner=fold_runner)
+        return fold_runner.fold_result
+
+    def _release_fold_runner(self, fold_runner: _LiveFoldRunner) -> None:
+        self._release_trainer_resources(fold_runner.trainer)
+        fold_runner.trainer = None
+        fold_runner.iterator = iter(())
+        fold_runner.last_event = None
+
     def _collect_trial_result(
         self,
         *,
@@ -155,7 +179,7 @@ class InMemoryOptunaSearchCV(OptunaSearchCV):
         pruned_epoch: Optional[int] = None,
         trial_logger: Optional[JsonlEventLogger] = None,
     ) -> OptunaTrialResult:
-        fold_results = [self._collect_fold_result(fold_runner=fold_runner) for fold_runner in live_folds]
+        fold_results = [self._materialize_fold_result(fold_runner=fold_runner) for fold_runner in live_folds]
 
         fold_metrics = [
             float(fold_result.best_metric)
@@ -273,7 +297,11 @@ class InMemoryOptunaSearchCV(OptunaSearchCV):
             trial_logger.emit(
                 "cv_trial_start",
                 payload={"trial_number": trial_number, "params": copy.deepcopy(params)},
-                message=f"Trial {trial_number} started. Logging to {trial_log_file}.",
+                message=(
+                    f"Trial {trial_number} started with params "
+                    f"{json.dumps(params, sort_keys=True)}. "
+                    f"Logging to {trial_log_file}."
+                ),
             )
 
         live_folds = self._build_live_folds(
@@ -286,98 +314,103 @@ class InMemoryOptunaSearchCV(OptunaSearchCV):
         )
         intermediate_reports: list[dict[str, Any]] = []
 
-        while True:
-            progressed = False
-            validation_epochs: set[int] = set()
+        try:
+            while True:
+                progressed = False
+                validation_epochs: set[int] = set()
 
-            for fold_runner in live_folds:
-                if fold_runner.completed:
+                for fold_runner in live_folds:
+                    if fold_runner.completed:
+                        continue
+
+                    try:
+                        event = next(fold_runner.iterator)
+                    except StopIteration:
+                        fold_runner.completed = True
+                        fold_runner.fold_result = self._collect_fold_result(fold_runner=fold_runner)
+                        self._release_fold_runner(fold_runner)
+                        continue
+
+                    progressed = True
+                    fold_runner.last_event = event
+                    if event.did_validate and event.selection_score is not None:
+                        fold_runner.last_selection_score = float(event.selection_score)
+                        validation_epochs.add(int(event.epoch))
+
+                if not progressed:
+                    break
+
+                if not validation_epochs:
                     continue
 
-                try:
-                    event = next(fold_runner.iterator)
-                except StopIteration:
-                    fold_runner.completed = True
+                if len(validation_epochs) != 1:
+                    raise RuntimeError(
+                        "In-memory synchronized CV expected a single validation epoch per sync step, "
+                        f"got {sorted(validation_epochs)}."
+                    )
+
+                sync_epoch = next(iter(validation_epochs))
+                fold_selection_scores = [
+                    float(fold_runner.last_selection_score)
+                    for fold_runner in live_folds
+                    if fold_runner.last_selection_score is not None
+                ]
+                if len(fold_selection_scores) == 0:
                     continue
 
-                progressed = True
-                fold_runner.last_event = event
-                if event.did_validate and event.selection_score is not None:
-                    fold_runner.last_selection_score = float(event.selection_score)
-                    validation_epochs.add(int(event.epoch))
+                aggregate_selection_score = float(sum(fold_selection_scores) / len(fold_selection_scores))
+                report = {
+                    "epoch": sync_epoch,
+                    "aggregate_selection_score": aggregate_selection_score,
+                    "fold_selection_scores": copy.deepcopy(fold_selection_scores),
+                    "n_reporting_folds": len(fold_selection_scores),
+                    "n_completed_folds": sum(1 for fold_runner in live_folds if fold_runner.completed),
+                }
+                intermediate_reports.append(report)
 
-            if not progressed:
-                break
+                if trial_logger is not None:
+                    trial_logger.emit(
+                        "cv_trial_epoch_report",
+                        payload=copy.deepcopy(report),
+                        message=(
+                            f"Trial {trial_number} sync epoch {sync_epoch}: "
+                            f"aggregate_selection_score={aggregate_selection_score:.6f}."
+                        ),
+                    )
 
-            if not validation_epochs:
-                continue
+                should_prune = False
+                if trial is not None and self._is_main_process():
+                    trial.report(aggregate_selection_score, sync_epoch)
+                    should_prune = bool(trial.should_prune())
+                if strategy is not None:
+                    should_prune = bool(strategy.broadcast_object(should_prune, src=0))
+                if should_prune:
+                    raise _PrunedTrialWithResult(
+                        self._collect_trial_result(
+                            trial=type("_TrialView", (), {"number": trial_number})(),
+                            params=params,
+                            live_folds=live_folds,
+                            intermediate_reports=intermediate_reports,
+                            status="PRUNED",
+                            trial_log_file=trial_log_file,
+                            error_message=f"Trial pruned at epoch {sync_epoch}.",
+                            pruned_epoch=sync_epoch,
+                            trial_logger=trial_logger,
+                        ),
+                        message=f"Trial pruned at epoch {sync_epoch}.",
+                    )
 
-            if len(validation_epochs) != 1:
-                raise RuntimeError(
-                    "In-memory synchronized CV expected a single validation epoch per sync step, "
-                    f"got {sorted(validation_epochs)}."
-                )
-
-            sync_epoch = next(iter(validation_epochs))
-            fold_selection_scores = [
-                float(fold_runner.last_selection_score)
-                for fold_runner in live_folds
-                if fold_runner.last_selection_score is not None
-            ]
-            if len(fold_selection_scores) == 0:
-                continue
-
-            aggregate_selection_score = float(sum(fold_selection_scores) / len(fold_selection_scores))
-            report = {
-                "epoch": sync_epoch,
-                "aggregate_selection_score": aggregate_selection_score,
-                "fold_selection_scores": copy.deepcopy(fold_selection_scores),
-                "n_reporting_folds": len(fold_selection_scores),
-                "n_completed_folds": sum(1 for fold_runner in live_folds if fold_runner.completed),
-            }
-            intermediate_reports.append(report)
-
-            if trial_logger is not None:
-                trial_logger.emit(
-                    "cv_trial_epoch_report",
-                    payload=copy.deepcopy(report),
-                    message=(
-                        f"Trial {trial_number} sync epoch {sync_epoch}: "
-                        f"aggregate_selection_score={aggregate_selection_score:.6f}."
-                    ),
-                )
-
-            should_prune = False
-            if trial is not None and self._is_main_process():
-                trial.report(aggregate_selection_score, sync_epoch)
-                should_prune = bool(trial.should_prune())
-            if strategy is not None:
-                should_prune = bool(strategy.broadcast_object(should_prune, src=0))
-            if should_prune:
-                raise _PrunedTrialWithResult(
-                    self._collect_trial_result(
-                        trial=type("_TrialView", (), {"number": trial_number})(),
-                        params=params,
-                        live_folds=live_folds,
-                        intermediate_reports=intermediate_reports,
-                        status="PRUNED",
-                        trial_log_file=trial_log_file,
-                        error_message=f"Trial pruned at epoch {sync_epoch}.",
-                        pruned_epoch=sync_epoch,
-                        trial_logger=trial_logger,
-                    ),
-                    message=f"Trial pruned at epoch {sync_epoch}.",
-                )
-
-        return self._collect_trial_result(
-            trial=type("_TrialView", (), {"number": trial_number})(),
-            params=params,
-            live_folds=live_folds,
-            intermediate_reports=intermediate_reports,
-            status="SUCCESS",
-            trial_log_file=trial_log_file,
-            trial_logger=trial_logger,
-        )
+            return self._collect_trial_result(
+                trial=type("_TrialView", (), {"number": trial_number})(),
+                params=params,
+                live_folds=live_folds,
+                intermediate_reports=intermediate_reports,
+                status="SUCCESS",
+                trial_log_file=trial_log_file,
+                trial_logger=trial_logger,
+            )
+        finally:
+            self._release_live_folds(live_folds)
 
     def _run_single_trial(
         self,

@@ -48,6 +48,9 @@ class DDPStrategy:
             return
         if self.process_group is not None:
             return
+        if self.context.device.type == "cuda":
+            # Bind each rank to its assigned GPU before NCCL initialization.
+            torch.cuda.set_device(self.context.local_rank)
         if not dist.is_initialized():
             kwargs: dict[str, Any] = {
                 "backend": self.config.backend,
