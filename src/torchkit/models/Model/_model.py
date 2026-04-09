@@ -167,7 +167,7 @@ class TorchkitModel(nn.Module):
         for name, phead in self.prediction_heads.items():
             if not self.heads[name].is_active:
                 continue
-            if phead.has_active_calibrator or phead.has_trainable_decision_module:
+            if phead.has_calibrator or phead.has_trainable_decision_module:
                 names.add(name)
         return names
     

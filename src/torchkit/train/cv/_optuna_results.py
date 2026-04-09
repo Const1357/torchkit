@@ -338,8 +338,11 @@ class OptunaSearchCVResult:
     final_model_state_dict_path: Optional[str] = None
 
     holdout_metrics: Optional[dict[str, Any]] = None
+    holdout_metrics_by_phase: Optional[dict[str, dict[str, Any]]] = None
     holdout_report_results: Optional[dict[str, Any]] = None
+    holdout_report_results_by_phase: Optional[dict[str, dict[str, Any]]] = None
     holdout_posthoc_results: Optional[dict[str, Any]] = None
+    final_posthoc_module_summary: Optional[dict[str, Any]] = None
 
     # CV-level metadata
     base_model_spec: Optional[TorchkitModelSpec] = None
@@ -463,8 +466,11 @@ class OptunaSearchCVResult:
             "final_history": copy.deepcopy(self.final_history),
             "final_model_state_dict_path": self.final_model_state_dict_path,
             "holdout_metrics": copy.deepcopy(self.holdout_metrics),
+            "holdout_metrics_by_phase": copy.deepcopy(self.holdout_metrics_by_phase),
             "holdout_report_results": copy.deepcopy(self.holdout_report_results),
+            "holdout_report_results_by_phase": copy.deepcopy(self.holdout_report_results_by_phase),
             "holdout_posthoc_results": copy.deepcopy(self.holdout_posthoc_results),
+            "final_posthoc_module_summary": copy.deepcopy(self.final_posthoc_module_summary),
             "parameter_grid": copy.deepcopy(self.parameter_grid),
             "report_evaluator": None if self.report_evaluator is None else _snapshot_object(self.report_evaluator),
             "posthoc_hooks": copy.deepcopy(self.posthoc_hooks),
@@ -593,8 +599,11 @@ class OuterFoldResult:
 
     inner_search_result: OptunaSearchCVResult = field(default_factory=OptunaSearchCVResult)
     outer_test_metrics: Optional[dict[str, Any]] = None
+    outer_test_metrics_by_phase: Optional[dict[str, dict[str, Any]]] = None
     outer_test_report_results: Optional[dict[str, Any]] = None
+    outer_test_report_results_by_phase: Optional[dict[str, dict[str, Any]]] = None
     outer_test_posthoc_results: Optional[dict[str, Any]] = None
+    outer_test_posthoc_module_summary: Optional[dict[str, Any]] = None
     log_file: Optional[str] = None
 
     @property
@@ -625,8 +634,11 @@ class OuterFoldResult:
             "outer_train_indices": copy.deepcopy(self.outer_train_indices),
             "outer_test_indices": copy.deepcopy(self.outer_test_indices),
             "outer_test_metrics": copy.deepcopy(self.outer_test_metrics),
+            "outer_test_metrics_by_phase": copy.deepcopy(self.outer_test_metrics_by_phase),
             "outer_test_report_results": copy.deepcopy(self.outer_test_report_results),
+            "outer_test_report_results_by_phase": copy.deepcopy(self.outer_test_report_results_by_phase),
             "outer_test_posthoc_results": copy.deepcopy(self.outer_test_posthoc_results),
+            "outer_test_posthoc_module_summary": copy.deepcopy(self.outer_test_posthoc_module_summary),
             "log_file": self.log_file,
             "n_outer_train": len(self.outer_train_indices),
             "n_outer_test": len(self.outer_test_indices),

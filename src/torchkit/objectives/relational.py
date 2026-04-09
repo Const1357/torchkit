@@ -118,7 +118,104 @@ class CELoss(Objective):
             weight=class_weight,
             reduction=self.reduction,
         )
-    
+
+
+class BinaryScoreMarginLoss(Objective):
+    """
+    Margin-based binary separation loss on a signed class score.
+
+    Supported input shapes:
+    - ``(N,)`` or ``(N, 1)``: interpreted directly as a binary score
+    - ``(N, 2)``: converted to a signed score via ``score = logits[:, 1] - logits[:, 0]``
+
+    Targets must be binary and are mapped to signed labels in ``{-1, +1}``.
+    The per-sample loss is ``max(0, margin - y_signed * score)``.
+
+    This objective is useful as a lightweight auxiliary term when you want to
+    encourage a larger separation between the two classes while preserving a
+    simple pointwise formulation that works even for very small batch sizes.
+    """
+
+    def __init__(
+        self,
+        input_path: str,
+        target_path: str,
+        *,
+        margin: float = 0.0,
+        name: str = "binary_score_margin_loss",
+        weight: float = 1.0,
+        reduction: Literal["mean", "sum"] = "mean",
+        is_optional: bool = False,
+    ):
+        super().__init__(
+            name=name,
+            weight=weight,
+            reduction=reduction,
+            is_optional=is_optional,
+        )
+
+        if margin < 0.0:
+            raise ValueError(f"margin must be non-negative, got {margin}.")
+
+        self._input_path = input_path
+        self._target_path = f"{target_path}"
+        self.margin = float(margin)
+        self._required_keys = (input_path, target_path)
+
+    @property
+    def required_keys(self) -> tuple[str, ...]:
+        return self._required_keys
+
+    @staticmethod
+    def _extract_binary_score(input_tensor: Tensor) -> Tensor:
+        if input_tensor.ndim == 1:
+            return input_tensor
+        if input_tensor.ndim == 2 and input_tensor.shape[1] == 1:
+            return input_tensor[:, 0]
+        if input_tensor.ndim == 2 and input_tensor.shape[1] == 2:
+            return input_tensor[:, 1] - input_tensor[:, 0]
+        raise ValueError(
+            "BinaryScoreMarginLoss expects logits/scores of shape (N,), (N,1), or (N,2). "
+            f"Got shape {tuple(input_tensor.shape)}."
+        )
+
+    @staticmethod
+    def _extract_binary_targets(target_tensor: Tensor) -> Tensor:
+        if target_tensor.ndim == 1:
+            y = target_tensor
+        elif target_tensor.ndim == 2 and target_tensor.shape[1] == 1:
+            y = target_tensor[:, 0]
+        elif target_tensor.ndim == 2 and target_tensor.shape[1] == 2:
+            y = torch.argmax(target_tensor, dim=1)
+        else:
+            raise ValueError(
+                "BinaryScoreMarginLoss expects targets of shape (N,), (N,1), or (N,2). "
+                f"Got shape {tuple(target_tensor.shape)}."
+            )
+
+        if torch.is_floating_point(y):
+            y = (y >= 0.5).to(dtype=torch.long)
+        else:
+            y = y.to(dtype=torch.long)
+
+        if torch.any((y != 0) & (y != 1)):
+            raise ValueError("BinaryScoreMarginLoss expects binary targets in {0,1}.")
+        return y
+
+    def loss(self, *, inputs: dict[str, Tensor]) -> Tensor:
+        input_tensor = self.resolve(inputs, self._input_path)
+        target_tensor = self.resolve(inputs, self._target_path)
+
+        score = self._extract_binary_score(input_tensor)
+        y = self._extract_binary_targets(target_tensor)
+        signed_targets = y.to(dtype=score.dtype) * 2.0 - 1.0
+        margin_residual = self.margin - signed_targets * score
+        per_sample = torch.relu(margin_residual)
+
+        if self.reduction == "mean":
+            return per_sample.mean()
+        return per_sample.sum()
+
 
 class MSELoss(Objective):
     

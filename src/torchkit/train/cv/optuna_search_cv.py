@@ -793,18 +793,22 @@ class OptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
                     ),
                 )
 
-            self._fit_posthoc_modules_from_oof(
-                final_trainer.model,
-                oof_logits=best_trial_result.aggregate_oof_logits,
-                oof_targets=best_trial_result.aggregate_oof_targets,
-            )
-
             holdout_metrics = None
+            holdout_metrics_by_phase = None
             holdout_report_results = None
+            holdout_report_results_by_phase = None
             holdout_posthoc_results = None
+            final_posthoc_module_summary = None
             if holdout_dataset is not None:
-                holdout_metrics = self._evaluate_holdout(final_trainer, holdout_dataset)
-                holdout_report_results = self._evaluate_report(final_trainer, holdout_dataset)
+                holdout_metrics_by_phase, holdout_report_results_by_phase, final_posthoc_module_summary = self._evaluate_holdout_phases(
+                    final_trainer,
+                    holdout_dataset,
+                    oof_logits=best_trial_result.aggregate_oof_logits,
+                    oof_targets=best_trial_result.aggregate_oof_targets,
+                )
+                holdout_metrics = copy.deepcopy(holdout_metrics_by_phase.get("posthoc_full"))
+                if holdout_report_results_by_phase is not None:
+                    holdout_report_results = copy.deepcopy(holdout_report_results_by_phase.get("posthoc_full"))
                 holdout_posthoc_results = self._run_posthoc_hooks(
                     trainer=final_trainer,
                     fit_dataset=dataset,
@@ -815,6 +819,15 @@ class OptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
                         "best_params": copy.deepcopy(best_params),
                     },
                 )
+            else:
+                self._fit_posthoc_modules_from_oof(
+                    final_trainer.model,
+                    oof_logits=best_trial_result.aggregate_oof_logits,
+                    oof_targets=best_trial_result.aggregate_oof_targets,
+                )
+                final_posthoc_module_summary = self._summarize_prediction_head_posthoc_modules(final_trainer.model)
+
+            final_model_spec = self._refresh_model_spec_posthoc_state(final_model_spec, final_trainer.model)
 
             final_model_state_dict_cpu = final_trainer._get_model_state_dict_cpu()
             final_model_state_dict_path = None
@@ -844,8 +857,11 @@ class OptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
                         "failed_trials": failed_trials,
                         "pruned_trials": pruned_trials,
                         "holdout_metrics": copy.deepcopy(holdout_metrics),
+                        "holdout_metrics_by_phase": copy.deepcopy(holdout_metrics_by_phase),
                         "holdout_report_results": copy.deepcopy(holdout_report_results),
+                        "holdout_report_results_by_phase": copy.deepcopy(holdout_report_results_by_phase),
                         "holdout_posthoc_results": copy.deepcopy(holdout_posthoc_results),
+                        "final_posthoc_module_summary": copy.deepcopy(final_posthoc_module_summary),
                     },
                     message=(
                         f"OptunaSearchCV ended. Best trial={best_trial_number}, "
@@ -882,8 +898,11 @@ class OptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
                 final_model_state_dict_cpu=final_model_state_dict_cpu if self.keep_final_model_state_dict_cpu else None,
                 final_model_state_dict_path=final_model_state_dict_path,
                 holdout_metrics=copy.deepcopy(holdout_metrics),
+                holdout_metrics_by_phase=copy.deepcopy(holdout_metrics_by_phase),
                 holdout_report_results=copy.deepcopy(holdout_report_results),
+                holdout_report_results_by_phase=copy.deepcopy(holdout_report_results_by_phase),
                 holdout_posthoc_results=copy.deepcopy(holdout_posthoc_results),
+                final_posthoc_module_summary=copy.deepcopy(final_posthoc_module_summary),
                 base_model_spec=copy.deepcopy(self.model_spec),
                 base_trainer_spec=copy.deepcopy(self.trainer_spec),
                 parameter_grid=copy.deepcopy(self.parameter_grid),

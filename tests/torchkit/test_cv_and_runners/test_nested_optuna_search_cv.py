@@ -61,7 +61,7 @@ def test_nested_cv_logs_everything_needed_for_reporting_stratified(
 ):
     y, _groups = tiny_labels_groups
 
-    model_spec = make_model_spec(scale_factor=1.0)
+    model_spec = make_model_spec(scale_factor=1.0, calibrator_active=False)
     trainer_spec = make_trainer_spec(
         evaluator=AccuracySelectorEvaluator(
             score_key="clf/logits",
@@ -147,11 +147,18 @@ def test_nested_cv_logs_everything_needed_for_reporting_stratified(
 
         # Outer holdout must be stored both places by current design
         assert outer.outer_test_metrics is not None
+        assert outer.outer_test_metrics_by_phase is not None
         assert inner.holdout_metrics is not None
+        assert inner.holdout_metrics_by_phase is not None
         assert outer.outer_test_metrics == inner.holdout_metrics
         assert outer.outer_test_report_results is not None
+        assert outer.outer_test_report_results_by_phase is not None
         assert inner.holdout_report_results is not None
+        assert inner.holdout_report_results_by_phase is not None
         assert outer.outer_test_report_results == inner.holdout_report_results
+        assert outer.outer_test_metrics_by_phase["posthoc_full"] == outer.outer_test_metrics
+        assert outer.outer_test_report_results_by_phase["posthoc_full"] == outer.outer_test_report_results
+        assert outer.outer_test_posthoc_module_summary is not None
         assert "val/classification" in outer.outer_test_metrics
         assert outer.outer_test_metrics["val/classification"] == pytest.approx(1.0)
         assert outer.outer_test_report_results["clf/accuracy"] == pytest.approx(1.0)
@@ -399,6 +406,7 @@ def test_nested_cv_rebuilds_final_model_and_trainer_and_preserves_calibrator_fit
     phead = rebuilt_model.prediction_heads["clf"]
     calibrator = phead.calibrator
     assert calibrator is not None
+    assert calibrator.is_active is True
     assert int(calibrator.fit_calls.item()) == 1
 
     outer0 = result.outer_results[0]

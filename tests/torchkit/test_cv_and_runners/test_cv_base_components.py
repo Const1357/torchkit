@@ -181,6 +181,42 @@ def test_base_cv_selection_metric_helpers_maximize_and_minimize(tmp_path):
     assert min_cv._to_selection_score(0.2) == pytest.approx(0.2)
 
 
+def test_base_cv_fits_and_enables_inactive_calibrator_from_oof(tmp_path):
+    model = TorchkitModelFactory.build(make_model_spec(scale_factor=1.0, calibrator_active=False))
+    trainer_spec = make_trainer_spec(
+        evaluator=AccuracySelectorEvaluator(
+            score_key="clf/logits",
+            target_key="batch/y",
+            name="classification",
+        )
+    )
+    cv = MinimalBaseCV(
+        model_spec=model,
+        trainer_spec=trainer_spec,
+        splitter_cls=StratifiedKFold,
+        n_splits=2,
+        final_model_dir=str(tmp_path / "posthoc"),
+    )
+
+    calibrator = model.prediction_heads["clf"].calibrator
+    assert calibrator is not None
+    assert calibrator.is_active is False
+
+    cv._fit_calibrators_from_oof(
+        model,
+        oof_logits={"clf": torch.tensor([[2.0, 0.0], [0.0, 2.0]], dtype=torch.float32)},
+        oof_targets={"clf": torch.tensor([0, 1], dtype=torch.long)},
+    )
+
+    assert calibrator.is_active is True
+    assert int(calibrator.fit_calls.item()) == 1
+
+    summary = cv._summarize_prediction_head_posthoc_modules(model)
+    assert summary is not None
+    assert summary["clf"]["calibrator"]["is_active"] is True
+    assert summary["clf"]["calibrator"]["state"]["fit_calls"] == 1
+
+
 def test_base_cv_rejects_unrebuildable_configuration():
     model_spec = make_model_spec()
     trainer_spec = make_trainer_spec(

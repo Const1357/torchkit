@@ -8,6 +8,7 @@ from torchkit.objectives._base import Objective
 from torchkit.objectives.Multitask import MultitaskObjective
 from torchkit.objectives.relational import (
     BCELoss,
+    BinaryScoreMarginLoss,
     CELoss,
     MSELoss,
     DiceLoss,
@@ -351,6 +352,84 @@ def test_ce_loss_accepts_python_list_class_weight(ce_inputs: dict[str, object]):
     )
 
     assert torch.allclose(loss, expected)
+
+
+def test_binary_score_margin_loss_runs_for_two_logit_binary_inputs():
+    inputs = {
+        "clf": {
+            "logits": torch.tensor(
+                [
+                    [-1.0, 2.0],
+                    [1.5, -0.5],
+                    [-0.2, 0.3],
+                ],
+                dtype=torch.float32,
+            ),
+        },
+        "batch": {
+            "y": torch.tensor([1, 0, 1], dtype=torch.long),
+        },
+    }
+    obj = BinaryScoreMarginLoss(
+        input_path="clf/logits",
+        target_path="batch/y",
+        margin=1.0,
+        reduction="mean",
+    )
+
+    loss = obj(inputs=inputs)
+
+    score = inputs["clf"]["logits"][:, 1] - inputs["clf"]["logits"][:, 0]
+    signed_targets = inputs["batch"]["y"].float() * 2.0 - 1.0
+    expected = torch.relu(torch.tensor(1.0) - signed_targets * score).mean()
+
+    assert torch.allclose(loss, expected)
+
+
+def test_binary_score_margin_loss_supports_scalar_binary_score_shapes():
+    inputs = {
+        "clf": {
+            "score": torch.tensor([[2.0], [-1.5], [0.25]], dtype=torch.float32),
+        },
+        "batch": {
+            "y": torch.tensor([[1], [0], [1]], dtype=torch.long),
+        },
+    }
+    obj = BinaryScoreMarginLoss(
+        input_path="clf/score",
+        target_path="batch/y",
+        margin=0.5,
+        reduction="sum",
+    )
+
+    loss = obj(inputs=inputs)
+    signed_targets = inputs["batch"]["y"][:, 0].float() * 2.0 - 1.0
+    expected = torch.relu(torch.tensor(0.5) - signed_targets * inputs["clf"]["score"][:, 0]).sum()
+
+    assert torch.allclose(loss, expected)
+
+
+def test_binary_score_margin_loss_rejects_negative_margin():
+    with pytest.raises(ValueError, match="margin must be non-negative"):
+        BinaryScoreMarginLoss(
+            input_path="clf/logits",
+            target_path="batch/y",
+            margin=-0.1,
+        )
+
+
+def test_binary_score_margin_loss_rejects_non_binary_targets():
+    obj = BinaryScoreMarginLoss(
+        input_path="clf/logits",
+        target_path="batch/y",
+    )
+    inputs = {
+        "clf": {"logits": torch.tensor([[0.0, 1.0], [1.0, 0.0]], dtype=torch.float32)},
+        "batch": {"y": torch.tensor([0, 2], dtype=torch.long)},
+    }
+
+    with pytest.raises(ValueError, match="binary targets"):
+        obj(inputs=inputs)
 
 
 def test_bce_loss_runs(bce_inputs: dict[str, object]):

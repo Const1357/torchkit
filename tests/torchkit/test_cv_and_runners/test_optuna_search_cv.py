@@ -266,7 +266,13 @@ def test_optuna_search_cv_logs_everything_needed_for_reporting_stratified(
     assert os.path.isfile(result.final_refit_log_file)
 
     assert result.holdout_metrics is not None
+    assert result.holdout_metrics_by_phase is not None
     assert result.holdout_report_results is not None
+    assert result.holdout_report_results_by_phase is not None
+    assert set(result.holdout_metrics_by_phase.keys()) == {"raw", "calibrated", "posthoc_full"}
+    assert set(result.holdout_report_results_by_phase.keys()) == {"raw", "calibrated", "posthoc_full"}
+    assert result.holdout_report_results == result.holdout_report_results_by_phase["posthoc_full"]
+    assert result.final_posthoc_module_summary is not None
     assert result.holdout_report_results["clf/accuracy"] == pytest.approx(1.0)
     assert result.holdout_report_results["clf/n_samples"] == len(tiny_dataset)
     assert isinstance(result.holdout_report_results["positive_logit_mean"], float)
@@ -352,16 +358,60 @@ def test_optuna_search_cv_stores_holdout_report_results(
 
     assert result.report_evaluator is not None
     assert result.holdout_report_results is not None
+    assert result.holdout_report_results_by_phase is not None
     assert result.selected_fold_report_results is not None
     assert result.holdout_report_results["clf/accuracy"] == pytest.approx(1.0)
     assert result.holdout_report_results["clf/n_samples"] == len(tiny_dataset)
 
     payload = result.to_dict()
     assert payload["holdout_report_results"]["clf/accuracy"] == pytest.approx(1.0)
+    assert payload["holdout_report_results_by_phase"]["posthoc_full"]["clf/accuracy"] == pytest.approx(1.0)
     assert payload["selected_fold_report_results"]["clf/accuracy"] == [pytest.approx(1.0), pytest.approx(1.0)]
     assert payload["report_evaluator"] is not None
     assert payload["log_dir"] == result.log_dir
     assert payload["run_log_file"] == result.run_log_file
+
+
+def test_optuna_search_cv_enables_inactive_start_calibrator_in_final_model(
+    tiny_dataset,
+    tiny_labels_groups,
+    tiny_report_evaluator,
+    tmp_path,
+):
+    y, _groups = tiny_labels_groups
+
+    cv = make_optuna_search_cv(
+        model_spec=make_model_spec(scale_factor=1.0, calibrator_active=False),
+        trainer_spec=make_trainer_spec(
+            evaluator=AccuracySelectorEvaluator(
+                score_key="clf/logits",
+                target_key="batch/y",
+                name="classification",
+            ),
+            max_epochs=2,
+        ),
+        splitter_cls=StratifiedKFold,
+        parameter_grid=ParameterGrid.from_simple({"model/backbone/kwargs/scale_factor": ([1.0], "categorical")}),
+        tmp_path=tmp_path,
+        n_trials=1,
+        max_trial_attempts=3,
+        n_splits=2,
+        report_evaluator=tiny_report_evaluator,
+        logging=False,
+    )
+
+    result = cv.run(tiny_dataset, index=y, groups=None, holdout_dataset=tiny_dataset)
+
+    assert result.final_posthoc_module_summary is not None
+    clf_summary = result.final_posthoc_module_summary["clf"]
+    assert clf_summary["calibrator"]["is_active"] is True
+    assert clf_summary["calibrator"]["state"]["fit_calls"] == 1
+
+    rebuilt_model = result.rebuild_final_model(device="cpu")
+    calibrator = rebuilt_model.prediction_heads["clf"].calibrator
+    assert calibrator is not None
+    assert calibrator.is_active is True
+    assert int(calibrator.fit_calls.item()) == 1
 
 
 def test_optuna_search_cv_uses_dataset_split_hooks(

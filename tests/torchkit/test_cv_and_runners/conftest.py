@@ -246,7 +246,7 @@ def make_labels_and_groups() -> tuple[list[int], list[int]]:
     return y, groups
 
 
-def make_model_spec(*, scale_factor: float = 1.0) -> TorchkitModelSpec:
+def make_model_spec(*, scale_factor: float = 1.0, calibrator_active: bool = True) -> TorchkitModelSpec:
     return TorchkitModelSpec(
         backbone=BackboneSpec(
             cls=DeterministicBackbone,
@@ -265,7 +265,7 @@ def make_model_spec(*, scale_factor: float = 1.0) -> TorchkitModelSpec:
                 calibrator=CalibratorSpec(
                     cls=RecordingIdentityCalibrator,
                     kwargs={},
-                    active=True,
+                    active=calibrator_active,
                 ),
                 probability_mapper=None,
                 decision_module=None,

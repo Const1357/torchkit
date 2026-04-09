@@ -123,7 +123,85 @@ def _resolve_original_indices_for_subset(dataset: TorchkitDataset | Subset) -> l
     return indices
 
 
+def _serialize_posthoc_tensor(value: torch.Tensor) -> Any:
+    tensor = value.detach().cpu()
+    if tensor.numel() == 1:
+        scalar = tensor.item()
+        if isinstance(scalar, bool):
+            return bool(scalar)
+        if isinstance(scalar, int):
+            return int(scalar)
+        if isinstance(scalar, float):
+            return float(scalar)
+        return scalar
+    if tensor.numel() <= 32:
+        return tensor.tolist()
+    return {
+        "shape": list(tensor.shape),
+        "dtype": str(tensor.dtype),
+        "device": str(tensor.device),
+    }
+
+
+def _summarize_posthoc_module(module: nn.Module | None) -> Optional[dict[str, Any]]:
+    if module is None:
+        return None
+
+    state = {
+        key: _serialize_posthoc_tensor(value)
+        for key, value in module.state_dict().items()
+    }
+    summary: dict[str, Any] = {
+        "qualified_name": f"{module.__class__.__module__}.{module.__class__.__qualname__}",
+        "state": state,
+    }
+    if hasattr(module, "is_active"):
+        summary["is_active"] = bool(getattr(module, "is_active"))
+    if hasattr(module, "is_trainable"):
+        summary["is_trainable"] = bool(getattr(module, "is_trainable"))
+    return summary
+
+
+def _summarize_prediction_head_posthoc_modules(model: Any) -> Optional[dict[str, Any]]:
+    prediction_heads = getattr(model, "prediction_heads", None)
+    if prediction_heads is None:
+        return None
+
+    out: dict[str, Any] = {}
+    for task, prediction_head in prediction_heads.items():
+        if prediction_head is None:
+            continue
+
+        calibrator = getattr(prediction_head, "calibrator", None)
+        decision_module = getattr(prediction_head, "decision_module", None)
+        out[task] = {
+            "prediction_head_active": bool(getattr(prediction_head, "is_active", True)),
+            "calibrator": _summarize_posthoc_module(calibrator),
+            "decision_module": _summarize_posthoc_module(decision_module),
+        }
+
+    return out or None
+
+
 class BaseCV:
+    @staticmethod
+    def _summarize_prediction_head_posthoc_modules(model: Any) -> Optional[dict[str, Any]]:
+        return _summarize_prediction_head_posthoc_modules(model)
+
+    @staticmethod
+    def _refresh_model_spec_posthoc_state(
+        model_spec: TorchkitModelSpec,
+        model: TorchkitModel,
+    ) -> TorchkitModelSpec:
+        refreshed = copy.deepcopy(model_spec)
+        if refreshed.prediction_heads is None:
+            return refreshed
+
+        for task_name, prediction_head in model.prediction_heads.items():
+            refreshed.prediction_heads[task_name] = prediction_head.to_spec()
+
+        return refreshed
+
     @staticmethod
     def _coerce_model_spec(model_spec: TorchkitModelSpec | TorchkitModel) -> TorchkitModelSpec:
         if isinstance(model_spec, TorchkitModelSpec):
@@ -347,6 +425,24 @@ class BaseCV:
         oof_logits: dict[str, torch.Tensor],
         oof_targets: dict[str, torch.Tensor],
     ) -> None:
+        self._fit_calibrators_from_oof(
+            model,
+            oof_logits=oof_logits,
+            oof_targets=oof_targets,
+        )
+        self._fit_decision_modules_from_oof(
+            model,
+            oof_logits=oof_logits,
+            oof_targets=oof_targets,
+        )
+
+    def _fit_calibrators_from_oof(
+        self,
+        model: Any,
+        *,
+        oof_logits: dict[str, torch.Tensor],
+        oof_targets: dict[str, torch.Tensor],
+    ) -> None:
         if not self.calibrate:
             return
 
@@ -359,11 +455,7 @@ class BaseCV:
                 continue
 
             calibrator = getattr(prediction_head, "calibrator", None)
-            decision_module = getattr(prediction_head, "decision_module", None)
-            needs_calibrator_fit = calibrator is not None and getattr(calibrator, "is_active", True)
-            needs_decision_fit = decision_module is not None and getattr(decision_module, "is_trainable", False)
-
-            if not needs_calibrator_fit and not needs_decision_fit:
+            if calibrator is None:
                 continue
 
             if task not in oof_logits or task not in oof_targets:
@@ -374,46 +466,102 @@ class BaseCV:
             logits = oof_logits[task]
             targets = oof_targets[task]
 
-            if needs_calibrator_fit:
-                calibrator.fit(
-                    logits=logits,
-                    targets=targets,
-                )
-                calibrator.enable()
+            calibrator.fit(
+                logits=logits,
+                targets=targets,
+            )
+            calibrator.enable()
 
-            if needs_decision_fit:
-                probability_mapper = getattr(prediction_head, "probability_mapper", None)
-                if probability_mapper is None:
-                    raise ValueError(
-                        f"Decision module for task {task!r} cannot be fit without a probability_mapper."
-                    )
-
-                with torch.no_grad():
-                    logits_for_decision = logits
-                    if calibrator is not None and getattr(calibrator, "is_active", True):
-                        logits_for_decision = logits_for_decision.to(_module_device(calibrator))
-                        logits_for_decision = calibrator(logits_for_decision)
-                    else:
-                        logits_for_decision = logits_for_decision.cpu()
-                    probs = probability_mapper(logits_for_decision)
-
-                decision_module.fit(
-                    probs=probs.detach().cpu(),
-                    targets=targets,
-                )
-
-    def _fit_calibrators_from_oof(
+    def _fit_decision_modules_from_oof(
         self,
         model: Any,
         *,
         oof_logits: dict[str, torch.Tensor],
         oof_targets: dict[str, torch.Tensor],
     ) -> None:
-        self._fit_posthoc_modules_from_oof(
-            model,
+        if not self.calibrate:
+            return
+
+        prediction_heads = getattr(model, "prediction_heads", None)
+        if prediction_heads is None:
+            return
+
+        for task, prediction_head in prediction_heads.items():
+            if prediction_head is None or not getattr(prediction_head, "is_active", True):
+                continue
+
+            decision_module = getattr(prediction_head, "decision_module", None)
+            needs_decision_fit = decision_module is not None and getattr(decision_module, "is_trainable", False)
+            if not needs_decision_fit:
+                continue
+
+            if task not in oof_logits or task not in oof_targets:
+                raise ValueError(
+                    f"Post-hoc module for task {task!r} requires OOF logits/targets, but they are missing."
+                )
+
+            calibrator = getattr(prediction_head, "calibrator", None)
+            probability_mapper = getattr(prediction_head, "probability_mapper", None)
+            if probability_mapper is None:
+                raise ValueError(
+                    f"Decision module for task {task!r} cannot be fit without a probability_mapper."
+                )
+
+            logits = oof_logits[task]
+            targets = oof_targets[task]
+
+            with torch.no_grad():
+                logits_for_decision = logits
+                if calibrator is not None and getattr(calibrator, "is_active", False):
+                    logits_for_decision = logits_for_decision.to(_module_device(calibrator))
+                    logits_for_decision = calibrator(logits_for_decision)
+                else:
+                    logits_for_decision = logits_for_decision.cpu()
+                probs = probability_mapper(logits_for_decision)
+
+            decision_module.fit(
+                probs=probs.detach().cpu(),
+                targets=targets,
+            )
+
+    def _evaluate_holdout_phases(
+        self,
+        trainer: Trainer,
+        dataset_subset: Subset | Dataset,
+        *,
+        oof_logits: dict[str, torch.Tensor],
+        oof_targets: dict[str, torch.Tensor],
+    ) -> tuple[dict[str, dict[str, Any]], Optional[dict[str, dict[str, Any]]], Optional[dict[str, Any]]]:
+        metrics_by_phase: dict[str, dict[str, Any]] = {
+            "raw": self._evaluate_holdout(trainer, dataset_subset),
+        }
+        report_by_phase: Optional[dict[str, dict[str, Any]]] = None
+        raw_report = self._evaluate_report(trainer, dataset_subset)
+        if raw_report is not None:
+            report_by_phase = {"raw": raw_report}
+
+        self._fit_calibrators_from_oof(
+            trainer.model,
             oof_logits=oof_logits,
             oof_targets=oof_targets,
         )
+        metrics_by_phase["calibrated"] = self._evaluate_holdout(trainer, dataset_subset)
+        calibrated_report = self._evaluate_report(trainer, dataset_subset)
+        if report_by_phase is not None and calibrated_report is not None:
+            report_by_phase["calibrated"] = calibrated_report
+
+        self._fit_decision_modules_from_oof(
+            trainer.model,
+            oof_logits=oof_logits,
+            oof_targets=oof_targets,
+        )
+        metrics_by_phase["posthoc_full"] = self._evaluate_holdout(trainer, dataset_subset)
+        posthoc_report = self._evaluate_report(trainer, dataset_subset)
+        if report_by_phase is not None and posthoc_report is not None:
+            report_by_phase["posthoc_full"] = posthoc_report
+
+        posthoc_summary = _summarize_prediction_head_posthoc_modules(trainer.model)
+        return metrics_by_phase, report_by_phase, posthoc_summary
 
     @staticmethod
     def _assert_exact_oof_coverage(

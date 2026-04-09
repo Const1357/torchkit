@@ -33,6 +33,10 @@ class PredictionHead(nn.Module):
         return self.calibrator is not None and self.calibrator.is_active
 
     @property
+    def has_calibrator(self) -> bool:
+        return self.calibrator is not None
+
+    @property
     def has_trainable_decision_module(self) -> bool:
         return (
             self.decision_module is not None

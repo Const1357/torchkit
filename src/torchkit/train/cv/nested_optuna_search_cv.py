@@ -203,6 +203,7 @@ class NestedOptunaSearchCV(BaseSearchCV):
             "trial_log_file": selected_trial.log_file,
             "search_log_file": inner_search_result.run_log_file,
             "selected_fold_report_results": copy.deepcopy(inner_search_result.selected_fold_report_results),
+            "selected_fold_report_results_raw": copy.deepcopy(inner_search_result.selected_fold_report_results),
             "selected_folds": selected_fold_artifacts,
             "base_model_spec": _snapshot_object(copy.deepcopy(inner_search_result.base_model_spec)),
             "base_trainer_spec": _snapshot_object(copy.deepcopy(inner_search_result.base_trainer_spec)),
@@ -228,8 +229,11 @@ class NestedOptunaSearchCV(BaseSearchCV):
             "final_best_epoch": inner_search_result.final_best_epoch,
             "final_best_metric": inner_search_result.final_best_metric,
             "holdout_metrics": copy.deepcopy(inner_search_result.holdout_metrics),
+            "holdout_metrics_by_phase": copy.deepcopy(inner_search_result.holdout_metrics_by_phase),
             "holdout_report_results": copy.deepcopy(inner_search_result.holdout_report_results),
+            "holdout_report_results_by_phase": copy.deepcopy(inner_search_result.holdout_report_results_by_phase),
             "holdout_posthoc_results": copy.deepcopy(inner_search_result.holdout_posthoc_results),
+            "final_posthoc_module_summary": copy.deepcopy(inner_search_result.final_posthoc_module_summary),
             "final_model_spec": _snapshot_object(copy.deepcopy(inner_search_result.final_model_spec)),
             "final_trainer_spec": _snapshot_object(copy.deepcopy(inner_search_result.final_trainer_spec)),
             "base_model_spec": _snapshot_object(copy.deepcopy(inner_search_result.base_model_spec)),
@@ -259,160 +263,180 @@ class NestedOptunaSearchCV(BaseSearchCV):
         index: Any = None,
         groups: Optional[Any] = None,
     ) -> NestedOptunaSearchCVResult:
-        outer_results: list[OuterFoldResult] = []
-        run_logger = None
-        run_log_file = None
-        if self.logging and self.log_dir is not None and self._is_main_process():
-            run_log_file = os.path.join(self.log_dir, "nested_search.log.jsonl")
-            run_logger = JsonlEventLogger(
-                run_log_file,
-                scope="nested_optuna_search_cv",
-                echo_console=True,
-            )
-            run_logger.emit(
-                "nested_cv_run_start",
-                payload={
-                    "k_outer": self.k_outer,
-                    "k_inner": self.k_inner,
-                    "n_trials": self.n_trials,
-                    "outer_splitter_name": self.outer_splitter_cls.__name__,
-                    "inner_splitter_name": self.inner_splitter_cls.__name__,
-                    "dataset_size": len(dataset),
-                    "log_dir": self.log_dir,
-                },
-                message=(
-                    f"NestedOptunaSearchCV started: k_outer={self.k_outer}, k_inner={self.k_inner}, "
-                    f"n_trials={self.n_trials}. Logging to {run_log_file}."
-                ),
-            )
+        strategy = getattr(self.trainer_spec, "distributed_strategy", None)
+        if strategy is not None:
+            strategy.initialize()
 
-        selection_metric_name = self._selection_metric_name()
-        selection_metric_direction = self._selection_metric_direction()
-        selection_metric_spec = self._selection_metric_spec()
-
-        for outer_fold, (outer_train_subset, outer_test_subset) in enumerate(
-            self._split(self.outer_splitter, dataset, index, groups)
-        ):
-            outer_train_indices = _resolve_original_indices_for_subset(outer_train_subset)
-            outer_test_indices = _resolve_original_indices_for_subset(outer_test_subset)
-            outer_train_dataset = dataset.subset(outer_train_indices, split=DatasetSplit.TRAIN)
-            outer_test_dataset = dataset.subset(outer_test_indices, split=DatasetSplit.TEST)
-            outer_log_file = None
-            outer_logger = None
+        try:
+            outer_results: list[OuterFoldResult] = []
+            run_logger = None
+            run_log_file = None
             if self.logging and self.log_dir is not None and self._is_main_process():
-                outer_log_file = os.path.join(self.log_dir, "outer_folds", f"outer_fold_{outer_fold:03d}.log.jsonl")
-                outer_logger = JsonlEventLogger(
-                    outer_log_file,
-                    scope="nested_outer_fold",
+                run_log_file = os.path.join(self.log_dir, "nested_search.log.jsonl")
+                run_logger = JsonlEventLogger(
+                    run_log_file,
+                    scope="nested_optuna_search_cv",
                     echo_console=True,
-                    context={"outer_fold": outer_fold},
                 )
-                outer_logger.emit(
-                    "nested_outer_fold_start",
+                run_logger.emit(
+                    "nested_cv_run_start",
                     payload={
-                        "outer_fold": outer_fold,
-                        "n_outer_train": len(outer_train_indices),
-                        "n_outer_test": len(outer_test_indices),
+                        "k_outer": self.k_outer,
+                        "k_inner": self.k_inner,
+                        "n_trials": self.n_trials,
+                        "outer_splitter_name": self.outer_splitter_cls.__name__,
+                        "inner_splitter_name": self.inner_splitter_cls.__name__,
+                        "dataset_size": len(dataset),
+                        "log_dir": self.log_dir,
                     },
                     message=(
-                        f"Outer fold {outer_fold} started "
-                        f"(n_outer_train={len(outer_train_indices)}, n_outer_test={len(outer_test_indices)}). "
-                        f"Logging to {outer_log_file}."
+                        f"NestedOptunaSearchCV started: k_outer={self.k_outer}, k_inner={self.k_inner}, "
+                        f"n_trials={self.n_trials}. Logging to {run_log_file}."
                     ),
                 )
 
-            inner_search = self._build_inner_search(outer_fold=outer_fold)
+            selection_metric_name = self._selection_metric_name()
+            selection_metric_direction = self._selection_metric_direction()
+            selection_metric_spec = self._selection_metric_spec()
 
-            inner_search_result = inner_search.run(
-                outer_train_dataset,
-                index=index,
-                groups=groups,
-                holdout_dataset=outer_test_dataset,
-            )
-            artifact_paths = self._persist_outer_fold_artifacts(
-                outer_fold=outer_fold,
-                inner_search_result=inner_search_result,
-                outer_train_indices=outer_train_indices,
-                outer_test_indices=outer_test_indices,
-            )
+            for outer_fold, (outer_train_subset, outer_test_subset) in enumerate(
+                self._split(self.outer_splitter, dataset, index, groups)
+            ):
+                if strategy is not None:
+                    strategy.barrier()
 
-            outer_results.append(
-                OuterFoldResult(
-                    fold=outer_fold,
-                    outer_train_indices=copy.deepcopy(outer_train_indices),
-                    outer_test_indices=copy.deepcopy(outer_test_indices),
+                outer_train_indices = _resolve_original_indices_for_subset(outer_train_subset)
+                outer_test_indices = _resolve_original_indices_for_subset(outer_test_subset)
+                outer_train_dataset = dataset.subset(outer_train_indices, split=DatasetSplit.TRAIN)
+                outer_test_dataset = dataset.subset(outer_test_indices, split=DatasetSplit.TEST)
+                outer_log_file = None
+                outer_logger = None
+                if self.logging and self.log_dir is not None and self._is_main_process():
+                    outer_log_file = os.path.join(self.log_dir, "outer_folds", f"outer_fold_{outer_fold:03d}.log.jsonl")
+                    outer_logger = JsonlEventLogger(
+                        outer_log_file,
+                        scope="nested_outer_fold",
+                        echo_console=True,
+                        context={"outer_fold": outer_fold},
+                    )
+                    outer_logger.emit(
+                        "nested_outer_fold_start",
+                        payload={
+                            "outer_fold": outer_fold,
+                            "n_outer_train": len(outer_train_indices),
+                            "n_outer_test": len(outer_test_indices),
+                        },
+                        message=(
+                            f"Outer fold {outer_fold} started "
+                            f"(n_outer_train={len(outer_train_indices)}, n_outer_test={len(outer_test_indices)}). "
+                            f"Logging to {outer_log_file}."
+                        ),
+                    )
+
+                inner_search = self._build_inner_search(outer_fold=outer_fold)
+
+                inner_search_result = inner_search.run(
+                    outer_train_dataset,
+                    index=index,
+                    groups=groups,
+                    holdout_dataset=outer_test_dataset,
+                )
+                artifact_paths = self._persist_outer_fold_artifacts(
+                    outer_fold=outer_fold,
                     inner_search_result=inner_search_result,
-                    outer_test_metrics=copy.deepcopy(inner_search_result.holdout_metrics),
-                    outer_test_report_results=copy.deepcopy(inner_search_result.holdout_report_results),
-                    outer_test_posthoc_results=copy.deepcopy(inner_search_result.holdout_posthoc_results),
-                    log_file=outer_log_file,
+                    outer_train_indices=outer_train_indices,
+                    outer_test_indices=outer_test_indices,
                 )
+
+                if strategy is not None:
+                    strategy.barrier()
+
+                outer_results.append(
+                    OuterFoldResult(
+                        fold=outer_fold,
+                        outer_train_indices=copy.deepcopy(outer_train_indices),
+                        outer_test_indices=copy.deepcopy(outer_test_indices),
+                        inner_search_result=inner_search_result,
+                        outer_test_metrics=copy.deepcopy(inner_search_result.holdout_metrics),
+                        outer_test_metrics_by_phase=copy.deepcopy(inner_search_result.holdout_metrics_by_phase),
+                        outer_test_report_results=copy.deepcopy(inner_search_result.holdout_report_results),
+                        outer_test_report_results_by_phase=copy.deepcopy(inner_search_result.holdout_report_results_by_phase),
+                        outer_test_posthoc_results=copy.deepcopy(inner_search_result.holdout_posthoc_results),
+                        outer_test_posthoc_module_summary=copy.deepcopy(inner_search_result.final_posthoc_module_summary),
+                        log_file=outer_log_file,
+                    )
+                )
+                if outer_logger is not None:
+                    outer_logger.emit(
+                        "nested_outer_fold_end",
+                        payload={
+                            "outer_fold": outer_fold,
+                            "best_trial_number": inner_search_result.best_trial_number,
+                            "best_metric": inner_search_result.best_metric,
+                            "best_selection_score": inner_search_result.best_selection_score,
+                            "outer_test_metrics": copy.deepcopy(inner_search_result.holdout_metrics),
+                            "outer_test_metrics_by_phase": copy.deepcopy(inner_search_result.holdout_metrics_by_phase),
+                            "outer_test_report_results": copy.deepcopy(inner_search_result.holdout_report_results),
+                            "outer_test_report_results_by_phase": copy.deepcopy(inner_search_result.holdout_report_results_by_phase),
+                            "outer_test_posthoc_results": copy.deepcopy(inner_search_result.holdout_posthoc_results),
+                            "outer_test_posthoc_module_summary": copy.deepcopy(inner_search_result.final_posthoc_module_summary),
+                            "inner_log_dir": inner_search_result.log_dir,
+                            "selected_trial_summary_path": artifact_paths["selected_trial_summary_path"],
+                            "refit_summary_path": artifact_paths["refit_summary_path"],
+                            "final_model_state_dict_path": inner_search_result.final_model_state_dict_path,
+                        },
+                        message=(
+                            f"Outer fold {outer_fold} ended. "
+                            f"best_trial={inner_search_result.best_trial_number}, "
+                            f"best_metric={inner_search_result.best_metric}, "
+                            f"inner_log_dir={inner_search_result.log_dir}."
+                        ),
+                    )
+
+            outer_report_results = _aggregate_report_results(
+                [outer.outer_test_report_results for outer in outer_results]
             )
-            if outer_logger is not None:
-                outer_logger.emit(
-                    "nested_outer_fold_end",
+            outer_posthoc_results = _aggregate_report_results(
+                [outer.outer_test_posthoc_results for outer in outer_results]
+            )
+            if run_logger is not None:
+                run_logger.emit(
+                    "nested_cv_run_end",
                     payload={
-                        "outer_fold": outer_fold,
-                        "best_trial_number": inner_search_result.best_trial_number,
-                        "best_metric": inner_search_result.best_metric,
-                        "best_selection_score": inner_search_result.best_selection_score,
-                        "outer_test_metrics": copy.deepcopy(inner_search_result.holdout_metrics),
-                        "outer_test_report_results": copy.deepcopy(inner_search_result.holdout_report_results),
-                        "outer_test_posthoc_results": copy.deepcopy(inner_search_result.holdout_posthoc_results),
-                        "inner_log_dir": inner_search_result.log_dir,
-                        "selected_trial_summary_path": artifact_paths["selected_trial_summary_path"],
-                        "refit_summary_path": artifact_paths["refit_summary_path"],
-                        "final_model_state_dict_path": inner_search_result.final_model_state_dict_path,
+                        "n_outer_folds": len(outer_results),
+                        "outer_report_results": copy.deepcopy(outer_report_results),
+                        "outer_posthoc_results": copy.deepcopy(outer_posthoc_results),
                     },
-                    message=(
-                        f"Outer fold {outer_fold} ended. "
-                        f"best_trial={inner_search_result.best_trial_number}, "
-                        f"best_metric={inner_search_result.best_metric}, "
-                        f"inner_log_dir={inner_search_result.log_dir}."
-                    ),
+                    message=f"NestedOptunaSearchCV ended after {len(outer_results)} outer folds.",
                 )
 
-        outer_report_results = _aggregate_report_results(
-            [outer.outer_test_report_results for outer in outer_results]
-        )
-        outer_posthoc_results = _aggregate_report_results(
-            [outer.outer_test_posthoc_results for outer in outer_results]
-        )
-        if run_logger is not None:
-            run_logger.emit(
-                "nested_cv_run_end",
-                payload={
-                    "n_outer_folds": len(outer_results),
-                    "outer_report_results": copy.deepcopy(outer_report_results),
-                    "outer_posthoc_results": copy.deepcopy(outer_posthoc_results),
-                },
-                message=f"NestedOptunaSearchCV ended after {len(outer_results)} outer folds.",
+            return NestedOptunaSearchCVResult(
+                outer_results=outer_results,
+                base_model_spec=copy.deepcopy(self.model_spec),
+                base_trainer_spec=copy.deepcopy(self.trainer_spec),
+                parameter_grid=copy.deepcopy(self.parameter_grid),
+                report_evaluator=copy.deepcopy(self.report_evaluator),
+                outer_report_results=copy.deepcopy(outer_report_results),
+                outer_posthoc_results=copy.deepcopy(outer_posthoc_results),
+                posthoc_hooks=copy.deepcopy(self.posthoc_hooks),
+                log_dir=self.log_dir,
+                run_log_file=run_log_file,
+                outer_splitter_name=self.outer_splitter_cls.__name__,
+                inner_splitter_name=self.inner_splitter_cls.__name__ if self.inner_splitter_cls is not None else "",
+                k_outer=self.k_outer,
+                k_inner=self.k_inner if self.k_inner is not None else 0,
+                shuffle_outer=self.shuffle_outer,
+                shuffle_inner=self.shuffle_inner,
+                random_state=self.random_state,
+                n_trials=self.n_trials,
+                max_trial_attempts=self.max_trial_attempts,
+                calibrate=self.calibrate,
+                final_model_dir=self.final_model_dir,
+                keep_final_model_state_dict_cpu=self.keep_final_model_state_dict_cpu,
+                selection_metric_name=selection_metric_name,
+                selection_metric_direction=selection_metric_direction,
+                selection_metric_spec=copy.deepcopy(selection_metric_spec),
             )
-
-        return NestedOptunaSearchCVResult(
-            outer_results=outer_results,
-            base_model_spec=copy.deepcopy(self.model_spec),
-            base_trainer_spec=copy.deepcopy(self.trainer_spec),
-            parameter_grid=copy.deepcopy(self.parameter_grid),
-            report_evaluator=copy.deepcopy(self.report_evaluator),
-            outer_report_results=copy.deepcopy(outer_report_results),
-            outer_posthoc_results=copy.deepcopy(outer_posthoc_results),
-            posthoc_hooks=copy.deepcopy(self.posthoc_hooks),
-            log_dir=self.log_dir,
-            run_log_file=run_log_file,
-            outer_splitter_name=self.outer_splitter_cls.__name__,
-            inner_splitter_name=self.inner_splitter_cls.__name__ if self.inner_splitter_cls is not None else "",
-            k_outer=self.k_outer,
-            k_inner=self.k_inner if self.k_inner is not None else 0,
-            shuffle_outer=self.shuffle_outer,
-            shuffle_inner=self.shuffle_inner,
-            random_state=self.random_state,
-            n_trials=self.n_trials,
-            max_trial_attempts=self.max_trial_attempts,
-            calibrate=self.calibrate,
-            final_model_dir=self.final_model_dir,
-            keep_final_model_state_dict_cpu=self.keep_final_model_state_dict_cpu,
-            selection_metric_name=selection_metric_name,
-            selection_metric_direction=selection_metric_direction,
-            selection_metric_spec=copy.deepcopy(selection_metric_spec),
-        )
+        finally:
+            if strategy is not None:
+                strategy.finalize()
