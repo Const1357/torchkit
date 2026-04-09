@@ -181,6 +181,21 @@ class _CountingStudyInMemoryOptunaSearchCV(InMemoryOptunaSearchCV):
         return super()._create_study()
 
 
+class _AlwaysPruningInMemoryOptunaSearchCV(_CountingStudyInMemoryOptunaSearchCV):
+    def _run_single_trial_with_params(
+        self,
+        *,
+        trial_number,
+        params,
+        search_dataset,
+        search_index,
+        search_groups,
+        search_original_indices,
+        trial=None,
+    ):
+        raise optuna.TrialPruned("synthetic distributed prune")
+
+
 class _CountingStudyInMemoryNestedOptunaSearchCV(InMemoryNestedOptunaSearchCV):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -370,6 +385,79 @@ def _distributed_nested_search_worker(rank: int, world_size: int, init_method: s
         strategy.finalize()
 
 
+def _distributed_exhausted_search_worker(rank: int, world_size: int, init_method: str, output_dir: str) -> None:
+    _configure_rank_env(rank=rank, world_size=world_size)
+    strategy = DDPStrategy(
+        config=DistributedConfig(
+            enabled=True,
+            backend="gloo",
+            init_method=init_method,
+        ),
+        context=DistributedContext.from_env(),
+    )
+
+    trainer_spec = make_trainer_spec(
+        evaluator=AccuracySelectorEvaluator(
+            score_key="clf/logits",
+            target_key="batch/y",
+            name="classification",
+        ),
+        max_epochs=1,
+    )
+    trainer_spec.config.device = "cpu"
+    trainer_spec.config.validate_every = 1
+    trainer_spec.distributed_strategy = strategy
+
+    def dataloader_factory(ds, shuffle):
+        sampler = DistributedSampler(
+            ds,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=shuffle,
+            drop_last=False,
+        )
+        return DataLoader(ds, batch_size=2, sampler=sampler, shuffle=False)
+
+    cv = _AlwaysPruningInMemoryOptunaSearchCV(
+        model_spec=make_model_spec(scale_factor=1.0),
+        trainer_spec=trainer_spec,
+        parameter_grid=ParameterGrid.from_simple(
+            {"model/backbone/kwargs/scale_factor": ([1.0], "categorical")}
+        ),
+        splitter_cls=StratifiedKFold,
+        dataloader_factory=dataloader_factory,
+        n_trials=1,
+        max_trial_attempts=1,
+        n_splits=2,
+        logging=False,
+        final_model_dir=output_dir,
+    )
+
+    dataset = TinyClassificationDataset()
+    labels, _groups = make_labels_and_groups()
+    payload: dict[str, object]
+    try:
+        cv.run(dataset, index=labels, groups=None)
+        payload = {
+            "ok": True,
+            "rank": rank,
+            "create_study_calls": cv.create_study_calls,
+        }
+    except Exception as exc:
+        import traceback
+
+        payload = {
+            "ok": False,
+            "rank": rank,
+            "create_study_calls": cv.create_study_calls,
+            "error": repr(exc),
+            "traceback": traceback.format_exc(),
+        }
+    finally:
+        torch.save(payload, Path(output_dir) / f"exhausted_search_rank_{rank}.pt")
+        strategy.finalize()
+
+
 def _spawn_and_collect(
     worker,
     *,
@@ -464,3 +552,19 @@ def test_distributed_in_memory_nested_optuna_search_uses_main_rank_studies_and_a
     assert rank1["outer_best_metrics"] == pytest.approx([1.0, 1.0])
     assert rank0["outer_best_selection_scores"] == pytest.approx([1.0, 1.0])
     assert rank1["outer_best_selection_scores"] == pytest.approx([1.0, 1.0])
+
+
+@pytest.mark.skipif(not torch.distributed.is_available(), reason="torch.distributed is unavailable")
+def test_distributed_in_memory_optuna_search_broadcasts_attempt_exhaustion_to_all_ranks() -> None:
+    results = _spawn_and_collect(_distributed_exhausted_search_worker, file_prefix="exhausted_search_rank_")
+
+    assert len(results) == 2
+    rank0, rank1 = results
+    assert not rank0["ok"], rank0.get("traceback")
+    assert not rank1["ok"], rank1.get("traceback")
+    assert rank0["create_study_calls"] == 1
+    assert rank1["create_study_calls"] == 0
+    assert "OptunaSearchCV produced no successful trials." in rank0["error"]
+    assert "OptunaSearchCV produced no successful trials." in rank1["error"]
+    assert "synthetic distributed prune" in rank0["error"]
+    assert "synthetic distributed prune" in rank1["error"]

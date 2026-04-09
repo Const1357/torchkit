@@ -424,459 +424,487 @@ class OptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
         if strategy is not None:
             strategy.initialize()
         is_main_process = self._is_main_process()
-
-        trial_results: list[OptunaTrialResult] = []
-        run_logger = None
-        run_log_file = None
-        if self.logging and self.log_dir is not None and is_main_process:
-            run_log_file = os.path.join(self.log_dir, "search.log.jsonl")
-            run_logger = JsonlEventLogger(
-                run_log_file,
-                scope="optuna_search_cv",
-                echo_console=True,
-            )
-            run_logger.emit(
-                "cv_run_start",
-                payload={
-                    "n_trials": self.n_trials,
-                    "n_splits": self.n_splits,
-                    "splitter_name": self.splitter_cls.__name__,
-                    "search_pool_size": len(search_original_indices),
-                    "has_holdout": holdout_dataset is not None,
-                    "log_dir": self.log_dir,
-                },
-                message=(
-                    f"OptunaSearchCV started: n_trials={self.n_trials}, n_splits={self.n_splits}, "
-                    f"splitter={self.splitter_cls.__name__}. Logging to {run_log_file}."
-                ),
-            )
-
-        study = self._create_study() if is_main_process else None
-
-        attempted_trials = 0
-        successful_trials = 0
-        failed_trials = 0
-        pruned_trials = 0
-
-        def _exhausted_attempts_error() -> RuntimeError:
-            last_error = None
-            if trial_results:
-                last_error = trial_results[-1].error_message
-            suffix = "" if last_error is None else f" Last trial error: {last_error}"
-            return RuntimeError(
-                f"Reached max_trial_attempts={self.max_trial_attempts} before obtaining "
-                f"{self.n_trials} successful trials. "
-                f"Successful={successful_trials}, failed={failed_trials}, pruned={pruned_trials}."
-                f"{suffix}"
-            )
-
-        if strategy is None:
-            while successful_trials < self.n_trials:
-                if attempted_trials >= self.max_trial_attempts:
-                    raise _exhausted_attempts_error()
-
-                assert study is not None
-                trial = study.ask()
-                attempted_trials += 1
-                params = copy.deepcopy(self.suggest_parameters(trial, self.parameter_grid))
-
-                try:
-                    trial_result = self._run_single_trial(
-                        trial=trial,
-                        search_dataset=dataset,
-                        search_index=search_index,
-                        search_groups=search_groups,
-                        search_original_indices=search_original_indices,
-                    )
-                    assert trial_result.aggregate_selection_score is not None
-                    study.tell(trial, trial_result.aggregate_selection_score)
-                    trial_results.append(trial_result)
-                    successful_trials += 1
-                    if run_logger is not None:
-                        run_logger.emit(
-                            "cv_trial_recorded",
-                            payload={
-                                "trial_number": trial_result.trial_number,
-                                "status": trial_result.status,
-                                "aggregate_metric": trial_result.aggregate_metric,
-                                "aggregate_selection_score": trial_result.aggregate_selection_score,
-                                "trial_log_file": trial_result.log_file,
-                            },
-                            message=(
-                                f"Recorded successful trial {trial_result.trial_number} "
-                                f"(aggregate_metric={trial_result.aggregate_metric}, "
-                                f"trial_log={trial_result.log_file})."
-                            ),
-                        )
-
-                except optuna.TrialPruned as e:
-                    tb = traceback.format_exc()
-                    study.tell(trial, state=TrialState.PRUNED)
-                    pruned_result = self._build_pruned_trial_result(
-                        trial_number=trial.number,
-                        params=params,
-                        exception=e,
-                        traceback_text=tb,
-                    )
-                    trial_results.append(pruned_result)
-                    pruned_trials += 1
-                    if run_logger is not None:
-                        run_logger.emit(
-                            "cv_trial_recorded",
-                            payload={
-                                "trial_number": trial.number,
-                                "status": "PRUNED",
-                                "error_message": str(e),
-                                "trial_log_file": pruned_result.log_file,
-                            },
-                            message=f"Trial {trial.number} pruned: {e}",
-                        )
-
-                except Exception as e:
-                    tb = traceback.format_exc()
-                    study.tell(trial, state=TrialState.FAIL)
-                    failed_result = self._build_failed_trial_result(
-                        trial_number=trial.number,
-                        params=params,
-                        exception=e,
-                        traceback_text=tb,
-                    )
-                    trial_results.append(failed_result)
-                    failed_trials += 1
-                    if run_logger is not None:
-                        run_logger.emit(
-                            "cv_trial_recorded",
-                            payload={
-                                "trial_number": trial.number,
-                                "status": "FAILED",
-                                "error_message": f"{type(e).__name__}: {e}",
-                                "trial_log_file": failed_result.log_file,
-                            },
-                            message=f"Trial {trial.number} failed with {type(e).__name__}: {e}",
-                        )
-        else:
-            while True:
-                command: dict[str, Any] | None = None
-                trial = None
-                if is_main_process:
-                    assert study is not None
-                    if successful_trials >= self.n_trials:
-                        command = {"type": "stop"}
-                    else:
-                        if attempted_trials >= self.max_trial_attempts:
-                            raise _exhausted_attempts_error()
-                        trial = study.ask()
-                        command = {
-                            "type": "trial",
-                            "trial_number": trial.number,
-                            "params": self.suggest_parameters(trial, self.parameter_grid),
-                        }
-
-                command = strategy.broadcast_object(command, src=0)
-
-                assert command is not None
-                if command["type"] == "stop":
-                    break
-
-                trial_number = int(command["trial_number"])
-                params = copy.deepcopy(command["params"])
-                attempted_trials += 1
-
-                try:
-                    trial_result = self._run_single_trial_with_params(
-                        trial_number=trial_number,
-                        params=params,
-                        search_dataset=dataset,
-                        search_index=search_index,
-                        search_groups=search_groups,
-                        search_original_indices=search_original_indices,
-                        trial=trial,
-                    )
-                    assert trial_result.aggregate_selection_score is not None
-                    if is_main_process:
-                        assert study is not None
-                        assert trial is not None
-                        study.tell(trial, trial_result.aggregate_selection_score)
-                    trial_results.append(trial_result)
-                    successful_trials += 1
-                    if run_logger is not None:
-                        run_logger.emit(
-                            "cv_trial_recorded",
-                            payload={
-                                "trial_number": trial_result.trial_number,
-                                "status": trial_result.status,
-                                "aggregate_metric": trial_result.aggregate_metric,
-                                "aggregate_selection_score": trial_result.aggregate_selection_score,
-                                "trial_log_file": trial_result.log_file,
-                            },
-                            message=(
-                                f"Recorded successful trial {trial_result.trial_number} "
-                                f"(aggregate_metric={trial_result.aggregate_metric}, "
-                                f"trial_log={trial_result.log_file})."
-                            ),
-                        )
-
-                except optuna.TrialPruned as e:
-                    tb = traceback.format_exc()
-                    if is_main_process:
-                        assert study is not None
-                        assert trial is not None
-                        study.tell(trial, state=TrialState.PRUNED)
-                    pruned_result = self._build_pruned_trial_result(
-                        trial_number=trial_number,
-                        params=params,
-                        exception=e,
-                        traceback_text=tb,
-                    )
-                    trial_results.append(pruned_result)
-                    pruned_trials += 1
-                    if run_logger is not None:
-                        run_logger.emit(
-                            "cv_trial_recorded",
-                            payload={
-                                "trial_number": trial_number,
-                                "status": "PRUNED",
-                                "error_message": str(e),
-                                "trial_log_file": pruned_result.log_file,
-                            },
-                            message=f"Trial {trial_number} pruned: {e}",
-                        )
-
-                except Exception as e:
-                    tb = traceback.format_exc()
-                    if is_main_process:
-                        assert study is not None
-                        assert trial is not None
-                        study.tell(trial, state=TrialState.FAIL)
-                    failed_result = self._build_failed_trial_result(
-                        trial_number=trial_number,
-                        params=params,
-                        exception=e,
-                        traceback_text=tb,
-                    )
-                    trial_results.append(failed_result)
-                    failed_trials += 1
-                    if run_logger is not None:
-                        run_logger.emit(
-                            "cv_trial_recorded",
-                            payload={
-                                "trial_number": trial_number,
-                                "status": "FAILED",
-                                "error_message": f"{type(e).__name__}: {e}",
-                                "trial_log_file": failed_result.log_file,
-                            },
-                            message=f"Trial {trial_number} failed with {type(e).__name__}: {e}",
-                        )
-
-        successful_trial_results = [tr for tr in trial_results if tr.status == "SUCCESS"]
-        if len(successful_trial_results) == 0:
-            raise RuntimeError("OptunaSearchCV produced no successful trials.")
-
-        best_trial_number = None
-        if is_main_process:
-            assert study is not None
-            best_trial_number = study.best_trial.number
-        if strategy is not None:
-            best_trial_number = strategy.broadcast_object(best_trial_number, src=0)
-        assert best_trial_number is not None
-
         try:
-            best_trial_result = next(
-                tr for tr in successful_trial_results if tr.trial_number == best_trial_number
-            )
-        except StopIteration as e:
-            raise RuntimeError(
-                f"Best Optuna trial {best_trial_number} was not found in stored successful trial_results."
-            ) from e
-
-        assert best_trial_result.aggregate_metric is not None
-        assert best_trial_result.aggregate_selection_score is not None
-
-        best_params = copy.deepcopy(best_trial_result.params)
-        best_metric = float(best_trial_result.aggregate_metric)
-        best_selection_score = float(best_trial_result.aggregate_selection_score)
-
-        selected_fold_metrics = [
-            float(r.best_metric) for r in best_trial_result.fold_results if r.best_metric is not None
-        ]
-        selected_metric_mean = (
-            float(statistics.mean(selected_fold_metrics)) if selected_fold_metrics else None
-        )
-        selected_metric_std = (
-            float(statistics.stdev(selected_fold_metrics))
-            if len(selected_fold_metrics) >= 2
-            else 0.0 if len(selected_fold_metrics) == 1
-            else None
-        )
-        selected_metric_min = (
-            float(min(selected_fold_metrics)) if selected_fold_metrics else None
-        )
-        selected_metric_max = (
-            float(max(selected_fold_metrics)) if selected_fold_metrics else None
-        )
-
-        final_model_spec, final_trainer_spec, final_trainer = self._build_trainer_for_trial(params=best_params)
-        search_loader = self.dataloader_factory(dataset, True)
-        final_refit_log_file = None
-        if self.logging and self.log_dir is not None:
-            final_refit_log_file = os.path.join(self.log_dir, "final_refit_trainer.log.jsonl")
-            final_trainer._set_event_logger(
-                JsonlEventLogger(
-                    final_refit_log_file,
-                    scope="trainer",
+            trial_results: list[OptunaTrialResult] = []
+            run_logger = None
+            run_log_file = None
+            if self.logging and self.log_dir is not None and is_main_process:
+                run_log_file = os.path.join(self.log_dir, "search.log.jsonl")
+                run_logger = JsonlEventLogger(
+                    run_log_file,
+                    scope="optuna_search_cv",
                     echo_console=True,
-                    context={"stage": "final_refit"},
                 )
+                run_logger.emit(
+                    "cv_run_start",
+                    payload={
+                        "n_trials": self.n_trials,
+                        "n_splits": self.n_splits,
+                        "splitter_name": self.splitter_cls.__name__,
+                        "search_pool_size": len(search_original_indices),
+                        "has_holdout": holdout_dataset is not None,
+                        "log_dir": self.log_dir,
+                    },
+                    message=(
+                        f"OptunaSearchCV started: n_trials={self.n_trials}, n_splits={self.n_splits}, "
+                        f"splitter={self.splitter_cls.__name__}. Logging to {run_log_file}."
+                    ),
+                )
+
+            study = self._create_study() if is_main_process else None
+
+            attempted_trials = 0
+            successful_trials = 0
+            failed_trials = 0
+            pruned_trials = 0
+
+            def _budget_exhausted_message() -> str:
+                last_error = None
+                if trial_results:
+                    last_error = trial_results[-1].error_message
+                suffix = "" if last_error is None else f" Last trial error: {last_error}"
+                return (
+                    f"Reached max_trial_attempts={self.max_trial_attempts} before obtaining "
+                    f"{self.n_trials} successful trials. "
+                    f"Successful={successful_trials}, failed={failed_trials}, pruned={pruned_trials}."
+                    f"{suffix}"
+                )
+
+            def _no_successful_trials_error() -> RuntimeError:
+                return RuntimeError(
+                    "OptunaSearchCV produced no successful trials. "
+                    + _budget_exhausted_message()
+                )
+
+            if strategy is None:
+                while (
+                    successful_trials < self.n_trials
+                    and attempted_trials < self.max_trial_attempts
+                ):
+                    assert study is not None
+                    trial = study.ask()
+                    attempted_trials += 1
+                    params = copy.deepcopy(self.suggest_parameters(trial, self.parameter_grid))
+
+                    try:
+                        trial_result = self._run_single_trial(
+                            trial=trial,
+                            search_dataset=dataset,
+                            search_index=search_index,
+                            search_groups=search_groups,
+                            search_original_indices=search_original_indices,
+                        )
+                        assert trial_result.aggregate_selection_score is not None
+                        study.tell(trial, trial_result.aggregate_selection_score)
+                        trial_results.append(trial_result)
+                        successful_trials += 1
+                        if run_logger is not None:
+                            run_logger.emit(
+                                "cv_trial_recorded",
+                                payload={
+                                    "trial_number": trial_result.trial_number,
+                                    "status": trial_result.status,
+                                    "aggregate_metric": trial_result.aggregate_metric,
+                                    "aggregate_selection_score": trial_result.aggregate_selection_score,
+                                    "trial_log_file": trial_result.log_file,
+                                },
+                                message=(
+                                    f"Recorded successful trial {trial_result.trial_number} "
+                                    f"(aggregate_metric={trial_result.aggregate_metric}, "
+                                    f"trial_log={trial_result.log_file})."
+                                ),
+                            )
+
+                    except optuna.TrialPruned as e:
+                        tb = traceback.format_exc()
+                        study.tell(trial, state=TrialState.PRUNED)
+                        pruned_result = self._build_pruned_trial_result(
+                            trial_number=trial.number,
+                            params=params,
+                            exception=e,
+                            traceback_text=tb,
+                        )
+                        trial_results.append(pruned_result)
+                        pruned_trials += 1
+                        if run_logger is not None:
+                            run_logger.emit(
+                                "cv_trial_recorded",
+                                payload={
+                                    "trial_number": trial.number,
+                                    "status": "PRUNED",
+                                    "error_message": str(e),
+                                    "trial_log_file": pruned_result.log_file,
+                                },
+                                message=f"Trial {trial.number} pruned: {e}",
+                            )
+
+                    except Exception as e:
+                        tb = traceback.format_exc()
+                        study.tell(trial, state=TrialState.FAIL)
+                        failed_result = self._build_failed_trial_result(
+                            trial_number=trial.number,
+                            params=params,
+                            exception=e,
+                            traceback_text=tb,
+                        )
+                        trial_results.append(failed_result)
+                        failed_trials += 1
+                        if run_logger is not None:
+                            run_logger.emit(
+                                "cv_trial_recorded",
+                                payload={
+                                    "trial_number": trial.number,
+                                    "status": "FAILED",
+                                    "error_message": f"{type(e).__name__}: {e}",
+                                    "trial_log_file": failed_result.log_file,
+                                },
+                                message=f"Trial {trial.number} failed with {type(e).__name__}: {e}",
+                            )
+            else:
+                while True:
+                    command: dict[str, Any] | None = None
+                    trial = None
+                    if is_main_process:
+                        assert study is not None
+                        if (
+                            successful_trials >= self.n_trials
+                            or attempted_trials >= self.max_trial_attempts
+                        ):
+                            command = {"type": "stop"}
+                        else:
+                            trial = study.ask()
+                            command = {
+                                "type": "trial",
+                                "trial_number": trial.number,
+                                "params": self.suggest_parameters(trial, self.parameter_grid),
+                            }
+
+                    command = strategy.broadcast_object(command, src=0)
+
+                    assert command is not None
+                    if command["type"] == "stop":
+                        break
+
+                    trial_number = int(command["trial_number"])
+                    params = copy.deepcopy(command["params"])
+                    attempted_trials += 1
+
+                    try:
+                        trial_result = self._run_single_trial_with_params(
+                            trial_number=trial_number,
+                            params=params,
+                            search_dataset=dataset,
+                            search_index=search_index,
+                            search_groups=search_groups,
+                            search_original_indices=search_original_indices,
+                            trial=trial,
+                        )
+                        assert trial_result.aggregate_selection_score is not None
+                        if is_main_process:
+                            assert study is not None
+                            assert trial is not None
+                            study.tell(trial, trial_result.aggregate_selection_score)
+                        trial_results.append(trial_result)
+                        successful_trials += 1
+                        if run_logger is not None:
+                            run_logger.emit(
+                                "cv_trial_recorded",
+                                payload={
+                                    "trial_number": trial_result.trial_number,
+                                    "status": trial_result.status,
+                                    "aggregate_metric": trial_result.aggregate_metric,
+                                    "aggregate_selection_score": trial_result.aggregate_selection_score,
+                                    "trial_log_file": trial_result.log_file,
+                                },
+                                message=(
+                                    f"Recorded successful trial {trial_result.trial_number} "
+                                    f"(aggregate_metric={trial_result.aggregate_metric}, "
+                                    f"trial_log={trial_result.log_file})."
+                                ),
+                            )
+
+                    except optuna.TrialPruned as e:
+                        tb = traceback.format_exc()
+                        if is_main_process:
+                            assert study is not None
+                            assert trial is not None
+                            study.tell(trial, state=TrialState.PRUNED)
+                        pruned_result = self._build_pruned_trial_result(
+                            trial_number=trial_number,
+                            params=params,
+                            exception=e,
+                            traceback_text=tb,
+                        )
+                        trial_results.append(pruned_result)
+                        pruned_trials += 1
+                        if run_logger is not None:
+                            run_logger.emit(
+                                "cv_trial_recorded",
+                                payload={
+                                    "trial_number": trial_number,
+                                    "status": "PRUNED",
+                                    "error_message": str(e),
+                                    "trial_log_file": pruned_result.log_file,
+                                },
+                                message=f"Trial {trial_number} pruned: {e}",
+                            )
+
+                    except Exception as e:
+                        tb = traceback.format_exc()
+                        if is_main_process:
+                            assert study is not None
+                            assert trial is not None
+                            study.tell(trial, state=TrialState.FAIL)
+                        failed_result = self._build_failed_trial_result(
+                            trial_number=trial_number,
+                            params=params,
+                            exception=e,
+                            traceback_text=tb,
+                        )
+                        trial_results.append(failed_result)
+                        failed_trials += 1
+                        if run_logger is not None:
+                            run_logger.emit(
+                                "cv_trial_recorded",
+                                payload={
+                                    "trial_number": trial_number,
+                                    "status": "FAILED",
+                                    "error_message": f"{type(e).__name__}: {e}",
+                                    "trial_log_file": failed_result.log_file,
+                                },
+                                message=f"Trial {trial_number} failed with {type(e).__name__}: {e}",
+                            )
+
+            if attempted_trials >= self.max_trial_attempts and successful_trials < self.n_trials:
+                if run_logger is not None:
+                    run_logger.emit(
+                        "cv_budget_exhausted",
+                        payload={
+                            "n_trials": self.n_trials,
+                            "max_trial_attempts": self.max_trial_attempts,
+                            "attempted_trials": attempted_trials,
+                            "successful_trials": successful_trials,
+                            "failed_trials": failed_trials,
+                            "pruned_trials": pruned_trials,
+                        },
+                        message=(
+                            "Search budget exhausted before reaching the desired number of "
+                            f"successful trials. {_budget_exhausted_message()}"
+                        ),
+                    )
+
+            successful_trial_results = [tr for tr in trial_results if tr.status == "SUCCESS"]
+            if len(successful_trial_results) == 0:
+                raise _no_successful_trials_error()
+
+            best_trial_number = None
+            if is_main_process:
+                assert study is not None
+                best_trial_number = study.best_trial.number
+            if strategy is not None:
+                best_trial_number = strategy.broadcast_object(best_trial_number, src=0)
+            assert best_trial_number is not None
+
+            try:
+                best_trial_result = next(
+                    tr for tr in successful_trial_results if tr.trial_number == best_trial_number
+                )
+            except StopIteration as e:
+                raise RuntimeError(
+                    f"Best Optuna trial {best_trial_number} was not found in stored successful trial_results."
+                ) from e
+
+            assert best_trial_result.aggregate_metric is not None
+            assert best_trial_result.aggregate_selection_score is not None
+
+            best_params = copy.deepcopy(best_trial_result.params)
+            best_metric = float(best_trial_result.aggregate_metric)
+            best_selection_score = float(best_trial_result.aggregate_selection_score)
+
+            selected_fold_metrics = [
+                float(r.best_metric) for r in best_trial_result.fold_results if r.best_metric is not None
+            ]
+            selected_metric_mean = (
+                float(statistics.mean(selected_fold_metrics)) if selected_fold_metrics else None
+            )
+            selected_metric_std = (
+                float(statistics.stdev(selected_fold_metrics))
+                if len(selected_fold_metrics) >= 2
+                else 0.0 if len(selected_fold_metrics) == 1
+                else None
+            )
+            selected_metric_min = (
+                float(min(selected_fold_metrics)) if selected_fold_metrics else None
+            )
+            selected_metric_max = (
+                float(max(selected_fold_metrics)) if selected_fold_metrics else None
+            )
+
+            final_model_spec, final_trainer_spec, final_trainer = self._build_trainer_for_trial(params=best_params)
+            search_loader = self.dataloader_factory(dataset, True)
+            final_refit_log_file = None
+            if self.logging and self.log_dir is not None:
+                final_refit_log_file = os.path.join(self.log_dir, "final_refit_trainer.log.jsonl")
+                final_trainer._set_event_logger(
+                    JsonlEventLogger(
+                        final_refit_log_file,
+                        scope="trainer",
+                        echo_console=True,
+                        context={"stage": "final_refit"},
+                    )
+                )
+                if run_logger is not None:
+                    run_logger.emit(
+                        "cv_final_refit_start",
+                        payload={
+                            "best_trial_number": best_trial_number,
+                            "best_params": copy.deepcopy(best_params),
+                        },
+                        message=f"Final refit started for best trial {best_trial_number}.",
+                    )
+
+            fold_best_epochs = [r.best_epoch for r in best_trial_result.fold_results if r.best_epoch is not None]
+            final_fit_epochs = (
+                int(statistics.median(fold_best_epochs))
+                if fold_best_epochs
+                else int(final_trainer.config.max_epochs)
+            )
+
+            final_trainer.fit(
+                search_loader,
+                val_loader=None,
+                reset_state=True,
+                max_epochs=final_fit_epochs,
+                early_stopping_patience=None,
             )
             if run_logger is not None:
                 run_logger.emit(
-                    "cv_final_refit_start",
+                    "cv_final_refit_end",
+                    payload={
+                        "best_trial_number": best_trial_number,
+                        "final_fit_epochs": final_fit_epochs,
+                        "final_best_epoch": final_trainer.state.best_epoch,
+                        "final_best_metric": final_trainer.state.best_metric,
+                        "trainer_log_file": final_refit_log_file,
+                    },
+                    message=(
+                        f"Final refit ended for best trial {best_trial_number}. "
+                        f"trainer_log={final_refit_log_file}."
+                    ),
+                )
+
+            self._fit_posthoc_modules_from_oof(
+                final_trainer.model,
+                oof_logits=best_trial_result.aggregate_oof_logits,
+                oof_targets=best_trial_result.aggregate_oof_targets,
+            )
+
+            holdout_metrics = None
+            holdout_report_results = None
+            holdout_posthoc_results = None
+            if holdout_dataset is not None:
+                holdout_metrics = self._evaluate_holdout(final_trainer, holdout_dataset)
+                holdout_report_results = self._evaluate_report(final_trainer, holdout_dataset)
+                holdout_posthoc_results = self._run_posthoc_hooks(
+                    trainer=final_trainer,
+                    fit_dataset=dataset,
+                    eval_dataset=holdout_dataset,
+                    stage="holdout",
                     payload={
                         "best_trial_number": best_trial_number,
                         "best_params": copy.deepcopy(best_params),
                     },
-                    message=f"Final refit started for best trial {best_trial_number}.",
                 )
 
-        fold_best_epochs = [r.best_epoch for r in best_trial_result.fold_results if r.best_epoch is not None]
-        final_fit_epochs = (
-            int(statistics.median(fold_best_epochs))
-            if fold_best_epochs
-            else int(final_trainer.config.max_epochs)
-        )
+            final_model_state_dict_cpu = final_trainer._get_model_state_dict_cpu()
+            final_model_state_dict_path = None
 
-        final_trainer.fit(
-            search_loader,
-            val_loader=None,
-            reset_state=True,
-            max_epochs=final_fit_epochs,
-            early_stopping_patience=None,
-        )
-        if run_logger is not None:
-            run_logger.emit(
-                "cv_final_refit_end",
-                payload={
-                    "best_trial_number": best_trial_number,
-                    "final_fit_epochs": final_fit_epochs,
-                    "final_best_epoch": final_trainer.state.best_epoch,
-                    "final_best_metric": final_trainer.state.best_metric,
-                    "trainer_log_file": final_refit_log_file,
-                },
-                message=(
-                    f"Final refit ended for best trial {best_trial_number}. "
-                    f"trainer_log={final_refit_log_file}."
-                ),
-            )
+            if self.final_model_dir is not None and is_main_process:
+                final_model_state_dict_path = os.path.join(
+                    self.final_model_dir,
+                    "final_model.pt",
+                )
+                torch.save(final_model_state_dict_cpu, final_model_state_dict_path)
+                if run_logger is not None:
+                    run_logger.emit(
+                        "cv_final_model_saved",
+                        payload={"path": final_model_state_dict_path},
+                        message=f"Final model state_dict saved to {final_model_state_dict_path}.",
+                    )
 
-        self._fit_posthoc_modules_from_oof(
-            final_trainer.model,
-            oof_logits=best_trial_result.aggregate_oof_logits,
-            oof_targets=best_trial_result.aggregate_oof_targets,
-        )
-
-        holdout_metrics = None
-        holdout_report_results = None
-        holdout_posthoc_results = None
-        if holdout_dataset is not None:
-            holdout_metrics = self._evaluate_holdout(final_trainer, holdout_dataset)
-            holdout_report_results = self._evaluate_report(final_trainer, holdout_dataset)
-            holdout_posthoc_results = self._run_posthoc_hooks(
-                trainer=final_trainer,
-                fit_dataset=dataset,
-                eval_dataset=holdout_dataset,
-                stage="holdout",
-                payload={
-                    "best_trial_number": best_trial_number,
-                    "best_params": copy.deepcopy(best_params),
-                },
-            )
-
-        final_model_state_dict_cpu = final_trainer._get_model_state_dict_cpu()
-        final_model_state_dict_path = None
-
-        if self.final_model_dir is not None and is_main_process:
-            final_model_state_dict_path = os.path.join(
-                self.final_model_dir,
-                "final_model.pt",
-            )
-            torch.save(final_model_state_dict_cpu, final_model_state_dict_path)
             if run_logger is not None:
                 run_logger.emit(
-                    "cv_final_model_saved",
-                    payload={"path": final_model_state_dict_path},
-                    message=f"Final model state_dict saved to {final_model_state_dict_path}.",
+                    "cv_run_end",
+                    payload={
+                        "best_trial_number": best_trial_number,
+                        "best_metric": best_metric,
+                        "best_selection_score": best_selection_score,
+                        "attempted_trials": attempted_trials,
+                        "successful_trials": successful_trials,
+                        "failed_trials": failed_trials,
+                        "pruned_trials": pruned_trials,
+                        "holdout_metrics": copy.deepcopy(holdout_metrics),
+                        "holdout_report_results": copy.deepcopy(holdout_report_results),
+                        "holdout_posthoc_results": copy.deepcopy(holdout_posthoc_results),
+                    },
+                    message=(
+                        f"OptunaSearchCV ended. Best trial={best_trial_number}, "
+                        f"best_metric={best_metric:.6f}, best_selection_score={best_selection_score:.6f}."
+                    ),
                 )
 
-        if run_logger is not None:
-            run_logger.emit(
-                "cv_run_end",
-                payload={
-                    "best_trial_number": best_trial_number,
-                    "best_metric": best_metric,
-                    "best_selection_score": best_selection_score,
-                    "attempted_trials": attempted_trials,
-                    "successful_trials": successful_trials,
-                    "failed_trials": failed_trials,
-                    "pruned_trials": pruned_trials,
-                    "holdout_metrics": copy.deepcopy(holdout_metrics),
-                    "holdout_report_results": copy.deepcopy(holdout_report_results),
-                    "holdout_posthoc_results": copy.deepcopy(holdout_posthoc_results),
-                },
-                message=(
-                    f"OptunaSearchCV ended. Best trial={best_trial_number}, "
-                    f"best_metric={best_metric:.6f}, best_selection_score={best_selection_score:.6f}."
-                ),
+            return OptunaSearchCVResult(
+                search_pool_indices=copy.deepcopy(search_original_indices),
+                trial_results=trial_results,
+                best_params=best_params,
+                best_metric=best_metric,
+                best_selection_score=best_selection_score,
+                best_trial_number=best_trial_number,
+                attempted_trials=attempted_trials,
+                successful_trials=successful_trials,
+                failed_trials=failed_trials,
+                pruned_trials=pruned_trials,
+                selected_fold_results=copy.deepcopy(best_trial_result.fold_results),
+                selected_fold_report_results=copy.deepcopy(best_trial_result.aggregate_fold_report_results),
+                selected_metric_mean=selected_metric_mean,
+                selected_metric_std=selected_metric_std,
+                selected_metric_min=selected_metric_min,
+                selected_metric_max=selected_metric_max,
+                final_model_spec=copy.deepcopy(final_model_spec),
+                final_trainer_spec=copy.deepcopy(final_trainer_spec),
+                final_fit_epochs=final_fit_epochs,
+                final_epochs_ran=int(final_trainer.state.epoch),
+                final_best_epoch=final_trainer.state.best_epoch,
+                final_best_metric=final_trainer.state.best_metric,
+                final_train_logs=copy.deepcopy(final_trainer.state.train_logs),
+                final_val_logs=copy.deepcopy(final_trainer.state.val_logs),
+                final_history=copy.deepcopy(final_trainer.history),
+                final_model_state_dict_cpu=final_model_state_dict_cpu if self.keep_final_model_state_dict_cpu else None,
+                final_model_state_dict_path=final_model_state_dict_path,
+                holdout_metrics=copy.deepcopy(holdout_metrics),
+                holdout_report_results=copy.deepcopy(holdout_report_results),
+                holdout_posthoc_results=copy.deepcopy(holdout_posthoc_results),
+                base_model_spec=copy.deepcopy(self.model_spec),
+                base_trainer_spec=copy.deepcopy(self.trainer_spec),
+                parameter_grid=copy.deepcopy(self.parameter_grid),
+                report_evaluator=copy.deepcopy(self.report_evaluator),
+                posthoc_hooks=copy.deepcopy(self.posthoc_hooks),
+                log_dir=self.log_dir,
+                run_log_file=run_log_file,
+                final_refit_log_file=final_refit_log_file,
+                splitter_name=self.splitter_cls.__name__,
+                n_splits=self.n_splits,
+                shuffle=self.shuffle,
+                random_state=self.random_state,
+                n_trials=self.n_trials,
+                max_trial_attempts=self.max_trial_attempts,
+                calibrate=self.calibrate,
+                final_model_dir=self.final_model_dir,
+                keep_final_model_state_dict_cpu=self.keep_final_model_state_dict_cpu,
+                selection_metric_name=selection_metric_name,
+                selection_metric_direction=selection_metric_direction,
+                selection_metric_spec=copy.deepcopy(selection_metric_spec),
             )
-
-        return OptunaSearchCVResult(
-            search_pool_indices=copy.deepcopy(search_original_indices),
-            trial_results=trial_results,
-            best_params=best_params,
-            best_metric=best_metric,
-            best_selection_score=best_selection_score,
-            best_trial_number=best_trial_number,
-            attempted_trials=attempted_trials,
-            successful_trials=successful_trials,
-            failed_trials=failed_trials,
-            pruned_trials=pruned_trials,
-            selected_fold_results=copy.deepcopy(best_trial_result.fold_results),
-            selected_fold_report_results=copy.deepcopy(best_trial_result.aggregate_fold_report_results),
-            selected_metric_mean=selected_metric_mean,
-            selected_metric_std=selected_metric_std,
-            selected_metric_min=selected_metric_min,
-            selected_metric_max=selected_metric_max,
-            final_model_spec=copy.deepcopy(final_model_spec),
-            final_trainer_spec=copy.deepcopy(final_trainer_spec),
-            final_fit_epochs=final_fit_epochs,
-            final_epochs_ran=int(final_trainer.state.epoch),
-            final_best_epoch=final_trainer.state.best_epoch,
-            final_best_metric=final_trainer.state.best_metric,
-            final_train_logs=copy.deepcopy(final_trainer.state.train_logs),
-            final_val_logs=copy.deepcopy(final_trainer.state.val_logs),
-            final_history=copy.deepcopy(final_trainer.history),
-            final_model_state_dict_cpu=final_model_state_dict_cpu if self.keep_final_model_state_dict_cpu else None,
-            final_model_state_dict_path=final_model_state_dict_path,
-            holdout_metrics=copy.deepcopy(holdout_metrics),
-            holdout_report_results=copy.deepcopy(holdout_report_results),
-            holdout_posthoc_results=copy.deepcopy(holdout_posthoc_results),
-            base_model_spec=copy.deepcopy(self.model_spec),
-            base_trainer_spec=copy.deepcopy(self.trainer_spec),
-            parameter_grid=copy.deepcopy(self.parameter_grid),
-            report_evaluator=copy.deepcopy(self.report_evaluator),
-            posthoc_hooks=copy.deepcopy(self.posthoc_hooks),
-            log_dir=self.log_dir,
-            run_log_file=run_log_file,
-            final_refit_log_file=final_refit_log_file,
-            splitter_name=self.splitter_cls.__name__,
-            n_splits=self.n_splits,
-            shuffle=self.shuffle,
-            random_state=self.random_state,
-            n_trials=self.n_trials,
-            max_trial_attempts=self.max_trial_attempts,
-            calibrate=self.calibrate,
-            final_model_dir=self.final_model_dir,
-            keep_final_model_state_dict_cpu=self.keep_final_model_state_dict_cpu,
-            selection_metric_name=selection_metric_name,
-            selection_metric_direction=selection_metric_direction,
-            selection_metric_spec=copy.deepcopy(selection_metric_spec),
-        )
+        finally:
+            if strategy is not None:
+                strategy.finalize()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import os
 import pickle
 
@@ -15,7 +16,8 @@ from torchkit.models.Model.factory import TorchkitModelFactory
 
 from torchkit.train.cv._optuna_search_mixin import ParameterGrid
 from torchkit.train.cv.optuna_search_cv import OptunaSearchCV
-from torchkit.train.cv._optuna_results import OptunaSearchCVResult
+from torchkit.train.cv._optuna_results import OptunaSearchCVResult, OptunaTrialResult
+from torchkit.train.cv._optuna_search_mixin import TrialStatus
 
 from tests.torchkit.test_cv_and_runners.conftest import (
     ErrorRateEvaluator,
@@ -23,6 +25,98 @@ from tests.torchkit.test_cv_and_runners.conftest import (
     make_trainer_spec,
     make_optuna_search_cv,
 )
+
+
+class _RecordingDistributedStrategy:
+    def __init__(self, *, is_main_process: bool, scripted_commands: list[dict[str, object]] | None = None):
+        self.is_enabled = True
+        self.is_main_process = is_main_process
+        self._scripted_commands = list(scripted_commands or [])
+        self.broadcast_calls: list[object] = []
+        self.initialize_calls = 0
+        self.finalize_calls = 0
+
+    def initialize(self) -> None:
+        self.initialize_calls += 1
+
+    def finalize(self) -> None:
+        self.finalize_calls += 1
+
+    def broadcast_object(self, obj, *, src: int = 0):
+        _ = src
+        self.broadcast_calls.append(copy.deepcopy(obj))
+        if self.is_main_process:
+            return copy.deepcopy(obj)
+        if not self._scripted_commands:
+            raise AssertionError("Expected a scripted distributed command.")
+        return copy.deepcopy(self._scripted_commands.pop(0))
+
+
+class _AlwaysPruningDistributedOptunaSearchCV(OptunaSearchCV):
+    def _run_single_trial_with_params(
+        self,
+        *,
+        trial_number,
+        params,
+        search_dataset,
+        search_index,
+        search_groups,
+        search_original_indices,
+        trial=None,
+    ):
+        _ = (
+            trial_number,
+            params,
+            search_dataset,
+            search_index,
+            search_groups,
+            search_original_indices,
+            trial,
+        )
+        raise optuna.TrialPruned("synthetic distributed prune")
+
+
+class _SuccessThenPruneDistributedOptunaSearchCV(OptunaSearchCV):
+    def _run_single_trial(
+        self,
+        *,
+        trial,
+        search_dataset,
+        search_index,
+        search_groups,
+        search_original_indices,
+    ):
+        params = self.suggest_parameters(trial, self.parameter_grid)
+        return self._run_single_trial_with_params(
+            trial_number=trial.number,
+            params=params,
+            search_dataset=search_dataset,
+            search_index=search_index,
+            search_groups=search_groups,
+            search_original_indices=search_original_indices,
+            trial=trial,
+        )
+
+    def _run_single_trial_with_params(
+        self,
+        *,
+        trial_number,
+        params,
+        search_dataset,
+        search_index,
+        search_groups,
+        search_original_indices,
+        trial=None,
+    ):
+        if trial_number == 1:
+            raise optuna.TrialPruned("synthetic distributed prune")
+        return OptunaTrialResult(
+            trial_number=trial_number,
+            params=copy.deepcopy(params),
+            status=TrialStatus.SUCCESS,
+            aggregate_metric=1.0,
+            aggregate_selection_score=1.0,
+        )
 
 
 def test_optuna_search_cv_rejects_unrebuildable_final_model_configuration():
@@ -650,6 +744,157 @@ class FaultInjectingOptunaSearchCV(OptunaSearchCV):
             search_groups=search_groups,
             search_original_indices=search_original_indices,
         )
+
+
+def test_optuna_search_cv_distributed_main_rank_broadcasts_stop_before_budget_exhaustion_error(
+    tiny_dataset,
+    tiny_labels_groups,
+    tmp_path,
+):
+    y, _groups = tiny_labels_groups
+
+    base_strategy = _RecordingDistributedStrategy(is_main_process=True)
+    trainer_spec = make_trainer_spec(
+        evaluator=AccuracySelectorEvaluator(
+            score_key="clf/logits",
+            target_key="batch/y",
+            name="classification",
+        ),
+        max_epochs=1,
+    )
+    trainer_spec.distributed_strategy = base_strategy
+
+    cv = _AlwaysPruningDistributedOptunaSearchCV(
+        model_spec=make_model_spec(scale_factor=1.0),
+        trainer_spec=trainer_spec,
+        parameter_grid=ParameterGrid.from_simple({"model/backbone/kwargs/scale_factor": ([1.0], "categorical")}),
+        splitter_cls=StratifiedKFold,
+        dataloader_factory=lambda ds, shuffle: torch.utils.data.DataLoader(ds, batch_size=2, shuffle=shuffle),
+        n_trials=1,
+        max_trial_attempts=1,
+        n_splits=2,
+        shuffle=False,
+        random_state=None,
+        calibrate=True,
+        final_model_dir=str(tmp_path),
+        keep_final_model_state_dict_cpu=True,
+    )
+    strategy = cv.trainer_spec.distributed_strategy
+
+    with pytest.raises(RuntimeError) as exc_info:
+        cv.run(tiny_dataset, index=y, groups=None)
+
+    assert str(exc_info.value) == (
+        "OptunaSearchCV produced no successful trials. "
+        "Reached max_trial_attempts=1 before obtaining 1 successful trials. "
+        "Successful=0, failed=0, pruned=1. Last trial error: synthetic distributed prune"
+    )
+    assert strategy.initialize_calls == 1
+    assert strategy.finalize_calls == 1
+    assert [command["type"] for command in strategy.broadcast_calls] == ["trial", "stop"]
+
+
+def test_optuna_search_cv_distributed_worker_rank_raises_when_budget_exhausts_without_completed_trials(
+    tiny_dataset,
+    tiny_labels_groups,
+    tmp_path,
+):
+    y, _groups = tiny_labels_groups
+    error_message = (
+        "OptunaSearchCV produced no successful trials. "
+        "Reached max_trial_attempts=1 before obtaining 1 successful trials. "
+        "Successful=0, failed=0, pruned=1. Last trial error: synthetic distributed prune"
+    )
+    base_strategy = _RecordingDistributedStrategy(
+        is_main_process=False,
+        scripted_commands=[
+            {
+                "type": "trial",
+                "trial_number": 0,
+                "params": {"model/backbone/kwargs/scale_factor": 1.0},
+            },
+            {
+                "type": "stop",
+            },
+        ],
+    )
+    trainer_spec = make_trainer_spec(
+        evaluator=AccuracySelectorEvaluator(
+            score_key="clf/logits",
+            target_key="batch/y",
+            name="classification",
+        ),
+        max_epochs=1,
+    )
+    trainer_spec.distributed_strategy = base_strategy
+
+    cv = _AlwaysPruningDistributedOptunaSearchCV(
+        model_spec=make_model_spec(scale_factor=1.0),
+        trainer_spec=trainer_spec,
+        parameter_grid=ParameterGrid.from_simple({"model/backbone/kwargs/scale_factor": ([1.0], "categorical")}),
+        splitter_cls=StratifiedKFold,
+        dataloader_factory=lambda ds, shuffle: torch.utils.data.DataLoader(ds, batch_size=2, shuffle=shuffle),
+        n_trials=1,
+        max_trial_attempts=1,
+        n_splits=2,
+        shuffle=False,
+        random_state=None,
+        calibrate=True,
+        final_model_dir=str(tmp_path),
+        keep_final_model_state_dict_cpu=True,
+    )
+    strategy = cv.trainer_spec.distributed_strategy
+
+    with pytest.raises(RuntimeError) as exc_info:
+        cv.run(tiny_dataset, index=y, groups=None)
+
+    assert str(exc_info.value) == error_message
+    assert strategy.initialize_calls == 1
+    assert strategy.finalize_calls == 1
+    assert strategy.broadcast_calls == [None, None]
+
+
+def test_optuna_search_cv_returns_best_completed_trial_when_budget_exhausts_before_target(
+    tiny_dataset,
+    tiny_labels_groups,
+    tmp_path,
+):
+    y, _groups = tiny_labels_groups
+
+    model_spec = make_model_spec(scale_factor=1.0)
+    trainer_spec = make_trainer_spec(
+        evaluator=AccuracySelectorEvaluator(
+            score_key="clf/logits",
+            target_key="batch/y",
+            name="classification",
+        ),
+        max_epochs=2,
+    )
+
+    cv = FaultInjectingOptunaSearchCV(
+        model_spec=model_spec,
+        trainer_spec=trainer_spec,
+        parameter_grid=ParameterGrid.from_simple({"model/backbone/kwargs/scale_factor": ([1.0], "categorical")}),
+        splitter_cls=StratifiedKFold,
+        dataloader_factory=lambda ds, shuffle: torch.utils.data.DataLoader(ds, batch_size=2, shuffle=shuffle),
+        n_trials=2,
+        max_trial_attempts=3,
+        n_splits=2,
+        shuffle=False,
+        random_state=None,
+        calibrate=True,
+        final_model_dir=str(tmp_path),
+        keep_final_model_state_dict_cpu=True,
+    )
+
+    result = cv.run(tiny_dataset, index=y, groups=None)
+
+    assert result.attempted_trials == 3
+    assert result.successful_trials == 1
+    assert result.pruned_trials == 1
+    assert result.failed_trials == 1
+    assert result.best_trial_number == 2
+    assert len(result.trial_results) == 3
 
 
 def test_optuna_search_cv_logs_failed_and_pruned_trials_with_params_and_tracebacks(
