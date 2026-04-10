@@ -190,20 +190,42 @@ class NestedOptunaSearchCV(BaseSearchCV):
             "outer_fold": outer_fold,
             "status": "outer_fold_completed",
             "best_trial_number": inner_search_result.best_trial_number,
+            "selected_trial_number": inner_search_result.best_trial_number,
             "best_params": copy.deepcopy(inner_search_result.best_params),
             "best_metric": inner_search_result.best_metric,
+            "selected_trial_best_value": inner_search_result.best_metric,
             "best_selection_score": inner_search_result.best_selection_score,
             "selected_metric_mean": inner_search_result.selected_metric_mean,
             "selected_metric_std": inner_search_result.selected_metric_std,
             "selected_metric_min": inner_search_result.selected_metric_min,
             "selected_metric_max": inner_search_result.selected_metric_max,
+            "selection_diagnostics": copy.deepcopy(inner_search_result.selection_diagnostics),
+            "selected_competence_summary": copy.deepcopy(inner_search_result.selected_competence_summary),
+            "selected_trial_main_metric": (
+                None
+                if inner_search_result.selection_diagnostics is None
+                else copy.deepcopy(inner_search_result.selection_diagnostics.get("selected_trial_main_metric"))
+            ),
+            "selected_trial_probe_auc": (
+                None
+                if inner_search_result.selection_diagnostics is None
+                else copy.deepcopy(inner_search_result.selection_diagnostics.get("selected_trial_probe_auc"))
+            ),
+            "selected_trial_probe_auc_defined": (
+                None
+                if inner_search_result.selection_diagnostics is None
+                else copy.deepcopy(inner_search_result.selection_diagnostics.get("selected_trial_probe_auc_defined"))
+            ),
             "search_pool_indices": copy.deepcopy(inner_search_result.search_pool_indices),
             "outer_train_indices": copy.deepcopy(outer_train_indices),
             "outer_test_indices": copy.deepcopy(outer_test_indices),
             "trial_log_file": selected_trial.log_file,
             "search_log_file": inner_search_result.run_log_file,
             "selected_fold_report_results": copy.deepcopy(inner_search_result.selected_fold_report_results),
-            "selected_fold_report_results_raw": copy.deepcopy(inner_search_result.selected_fold_report_results),
+            "selected_fold_report_results_raw": copy.deepcopy(
+                inner_search_result.selected_fold_report_results_raw
+            ),
+            "fold_best_epochs": copy.deepcopy(inner_search_result.fold_best_epochs),
             "selected_folds": selected_fold_artifacts,
             "base_model_spec": _snapshot_object(copy.deepcopy(inner_search_result.base_model_spec)),
             "base_trainer_spec": _snapshot_object(copy.deepcopy(inner_search_result.base_trainer_spec)),
@@ -224,6 +246,7 @@ class NestedOptunaSearchCV(BaseSearchCV):
             "search_log_file": inner_search_result.run_log_file,
             "outer_train_indices": copy.deepcopy(outer_train_indices),
             "outer_test_indices": copy.deepcopy(outer_test_indices),
+            "fold_best_epochs": copy.deepcopy(inner_search_result.fold_best_epochs),
             "final_fit_epochs": inner_search_result.final_fit_epochs,
             "final_epochs_ran": inner_search_result.final_epochs_ran,
             "final_best_epoch": inner_search_result.final_best_epoch,

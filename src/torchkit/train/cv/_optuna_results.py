@@ -317,10 +317,14 @@ class OptunaSearchCVResult:
 
     selected_fold_results: list[FoldResult] = field(default_factory=list)
     selected_fold_report_results: Optional[dict[str, list[Any]]] = None
+    selected_fold_report_results_raw: Optional[dict[str, list[Any]]] = None
     selected_metric_mean: Optional[float] = None
     selected_metric_std: Optional[float] = None
     selected_metric_min: Optional[float] = None
     selected_metric_max: Optional[float] = None
+    selection_diagnostics: Optional[dict[str, Any]] = None
+    selected_competence_summary: Optional[dict[str, Any]] = None
+    fold_best_epochs: Optional[list[int]] = None
 
     final_model_spec: Optional[TorchkitModelSpec] = None
     final_trainer_spec: Optional[TrainerSpec] = None
@@ -453,10 +457,14 @@ class OptunaSearchCVResult:
                 fr.to_dict(include_tensors=include_tensors) for fr in self.selected_fold_results
             ],
             "selected_fold_report_results": copy.deepcopy(self.selected_fold_report_results),
+            "selected_fold_report_results_raw": copy.deepcopy(self.selected_fold_report_results_raw),
             "selected_metric_mean": self.selected_metric_mean,
             "selected_metric_std": self.selected_metric_std,
             "selected_metric_min": self.selected_metric_min,
             "selected_metric_max": self.selected_metric_max,
+            "selection_diagnostics": copy.deepcopy(self.selection_diagnostics),
+            "selected_competence_summary": copy.deepcopy(self.selected_competence_summary),
+            "fold_best_epochs": copy.deepcopy(self.fold_best_epochs),
             "final_fit_epochs": self.final_fit_epochs,
             "final_epochs_ran": self.final_epochs_ran,
             "final_best_epoch": self.final_best_epoch,

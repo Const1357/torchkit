@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import pickle
 
@@ -179,6 +180,25 @@ def test_nested_cv_logs_everything_needed_for_reporting_stratified(
             assert fold.report_results is not None
             assert fold.report_results["clf/accuracy"] == pytest.approx(1.0)
             assert fold.report_results["clf/n_samples"] == len(fold.val_indices)
+
+    selected_summary_path = os.path.join(result.log_dir, "outer_folds", "outer_fold_000", "selected_trial_summary.json")
+    refit_summary_path = os.path.join(result.log_dir, "outer_folds", "outer_fold_000", "refit_summary.json")
+    assert os.path.isfile(selected_summary_path)
+    assert os.path.isfile(refit_summary_path)
+
+    selected_summary = json.loads(open(selected_summary_path, encoding="utf-8").read())
+    refit_summary = json.loads(open(refit_summary_path, encoding="utf-8").read())
+
+    assert selected_summary["best_trial_number"] == 0
+    assert selected_summary["selected_trial_number"] == 0
+    assert selected_summary["selected_trial_best_value"] == pytest.approx(1.0)
+    assert selected_summary["selected_fold_report_results_raw"] == selected_summary["selected_fold_report_results"]
+    assert len(selected_summary["fold_best_epochs"]) == 2
+    assert all(isinstance(epoch, int) for epoch in selected_summary["fold_best_epochs"])
+    assert selected_summary["selection_diagnostics"] is None
+    assert selected_summary["selected_competence_summary"] is None
+    assert refit_summary["fold_best_epochs"] == selected_summary["fold_best_epochs"]
+    assert refit_summary["final_fit_epochs"] in selected_summary["fold_best_epochs"]
 
     assert result.outer_report_results is not None
     assert result.outer_report_results["clf/accuracy"] == [pytest.approx(1.0), pytest.approx(1.0)]
