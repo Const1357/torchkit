@@ -147,6 +147,7 @@ class NestedOptunaSearchCV(BaseSearchCV):
 
         selected_summary_path = None
         refit_summary_path = None
+        outer_fold_result_path = None
 
         outer_fold_log_dir = (
             os.path.join(self.log_dir, "outer_folds", f"outer_fold_{outer_fold:03d}")
@@ -266,12 +267,30 @@ class NestedOptunaSearchCV(BaseSearchCV):
         if outer_fold_log_dir is not None:
             selected_summary_path = os.path.join(outer_fold_log_dir, "selected_trial_summary.json")
             refit_summary_path = os.path.join(outer_fold_log_dir, "refit_summary.json")
+            outer_fold_result_path = os.path.join(outer_fold_log_dir, "outer_fold_result.json")
             self._write_json(selected_summary_path, selected_summary)
             self._write_json(refit_summary_path, refit_summary)
+            self._write_json(
+                outer_fold_result_path,
+                OuterFoldResult(
+                    fold=outer_fold,
+                    outer_train_indices=copy.deepcopy(outer_train_indices),
+                    outer_test_indices=copy.deepcopy(outer_test_indices),
+                    inner_search_result=copy.deepcopy(inner_search_result),
+                    outer_test_metrics=copy.deepcopy(inner_search_result.holdout_metrics),
+                    outer_test_metrics_by_phase=copy.deepcopy(inner_search_result.holdout_metrics_by_phase),
+                    outer_test_report_results=copy.deepcopy(inner_search_result.holdout_report_results),
+                    outer_test_report_results_by_phase=copy.deepcopy(inner_search_result.holdout_report_results_by_phase),
+                    outer_test_posthoc_results=copy.deepcopy(inner_search_result.holdout_posthoc_results),
+                    outer_test_posthoc_module_summary=copy.deepcopy(inner_search_result.final_posthoc_module_summary),
+                    log_file=os.path.join(outer_fold_log_dir, f"outer_fold_{outer_fold:03d}.log.jsonl"),
+                ).to_dict(include_tensors=False, include_tracebacks=True, include_inner_search_result=True),
+            )
 
         return {
             "selected_trial_summary_path": selected_summary_path,
             "refit_summary_path": refit_summary_path,
+            "outer_fold_result_path": outer_fold_result_path,
         }
 
     def _is_main_process(self) -> bool:
@@ -285,6 +304,8 @@ class NestedOptunaSearchCV(BaseSearchCV):
         dataset: TorchkitDataset,
         index: Any = None,
         groups: Optional[Any] = None,
+        *,
+        outer_fold_indices: Optional[set[int]] = None,
     ) -> NestedOptunaSearchCVResult:
         strategy = getattr(self.trainer_spec, "distributed_strategy", None)
         if strategy is not None:
@@ -322,9 +343,14 @@ class NestedOptunaSearchCV(BaseSearchCV):
             selection_metric_direction = self._selection_metric_direction()
             selection_metric_spec = self._selection_metric_spec()
 
+            requested_outer_folds = None if outer_fold_indices is None else {int(fold) for fold in outer_fold_indices}
+
             for outer_fold, (outer_train_subset, outer_test_subset) in enumerate(
                 self._split(self.outer_splitter, dataset, index, groups)
             ):
+                if requested_outer_folds is not None and outer_fold not in requested_outer_folds:
+                    continue
+
                 if strategy is not None:
                     strategy.barrier()
 
@@ -406,6 +432,7 @@ class NestedOptunaSearchCV(BaseSearchCV):
                             "inner_log_dir": inner_search_result.log_dir,
                             "selected_trial_summary_path": artifact_paths["selected_trial_summary_path"],
                             "refit_summary_path": artifact_paths["refit_summary_path"],
+                            "outer_fold_result_path": artifact_paths["outer_fold_result_path"],
                             "final_model_state_dict_path": inner_search_result.final_model_state_dict_path,
                         },
                         message=(
@@ -414,6 +441,14 @@ class NestedOptunaSearchCV(BaseSearchCV):
                             f"best_metric={inner_search_result.best_metric}, "
                             f"inner_log_dir={inner_search_result.log_dir}."
                         ),
+                    )
+
+            if requested_outer_folds is not None:
+                completed_outer_folds = {int(result.fold) for result in outer_results}
+                missing_outer_folds = sorted(requested_outer_folds - completed_outer_folds)
+                if missing_outer_folds:
+                    raise ValueError(
+                        f"Requested outer folds were not produced: {missing_outer_folds}."
                     )
 
             outer_report_results = _aggregate_report_results(
@@ -463,3 +498,65 @@ class NestedOptunaSearchCV(BaseSearchCV):
         finally:
             if strategy is not None:
                 strategy.finalize()
+
+    @staticmethod
+    def aggregate_outer_results(
+        outer_results: list[OuterFoldResult],
+        *,
+        model_spec: Any,
+        trainer_spec: Any,
+        parameter_grid: Any,
+        report_evaluator: Any,
+        posthoc_hooks: Any,
+        log_dir: Optional[str],
+        run_log_file: Optional[str],
+        outer_splitter_name: str,
+        inner_splitter_name: str,
+        k_outer: int,
+        k_inner: int,
+        shuffle_outer: bool,
+        shuffle_inner: bool,
+        random_state: Optional[int],
+        n_trials: int,
+        max_trial_attempts: int,
+        calibrate: bool,
+        final_model_dir: Optional[str],
+        keep_final_model_state_dict_cpu: bool,
+        selection_metric_name: str,
+        selection_metric_direction: Any,
+        selection_metric_spec: dict[str, Any],
+    ) -> NestedOptunaSearchCVResult:
+        ordered_outer_results = sorted(copy.deepcopy(outer_results), key=lambda result: int(result.fold))
+        outer_report_results = _aggregate_report_results(
+            [outer.outer_test_report_results for outer in ordered_outer_results]
+        )
+        outer_posthoc_results = _aggregate_report_results(
+            [outer.outer_test_posthoc_results for outer in ordered_outer_results]
+        )
+        return NestedOptunaSearchCVResult(
+            outer_results=ordered_outer_results,
+            base_model_spec=copy.deepcopy(model_spec),
+            base_trainer_spec=copy.deepcopy(trainer_spec),
+            parameter_grid=copy.deepcopy(parameter_grid),
+            report_evaluator=copy.deepcopy(report_evaluator),
+            outer_report_results=copy.deepcopy(outer_report_results),
+            outer_posthoc_results=copy.deepcopy(outer_posthoc_results),
+            posthoc_hooks=copy.deepcopy(posthoc_hooks),
+            log_dir=log_dir,
+            run_log_file=run_log_file,
+            outer_splitter_name=outer_splitter_name,
+            inner_splitter_name=inner_splitter_name,
+            k_outer=k_outer,
+            k_inner=k_inner,
+            shuffle_outer=shuffle_outer,
+            shuffle_inner=shuffle_inner,
+            random_state=random_state,
+            n_trials=n_trials,
+            max_trial_attempts=max_trial_attempts,
+            calibrate=calibrate,
+            final_model_dir=final_model_dir,
+            keep_final_model_state_dict_cpu=keep_final_model_state_dict_cpu,
+            selection_metric_name=selection_metric_name,
+            selection_metric_direction=selection_metric_direction,
+            selection_metric_spec=copy.deepcopy(selection_metric_spec),
+        )

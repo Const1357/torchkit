@@ -290,6 +290,26 @@ class FoldResult:
             "n_oof": len(self.oof_sample_indices),
         }
 
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "FoldResult":
+        return cls(
+            fold=int(payload.get("fold", 0)),
+            train_indices=list(payload.get("train_indices", [])),
+            val_indices=list(payload.get("val_indices", [])),
+            best_metric=payload.get("best_metric"),
+            best_epoch=payload.get("best_epoch"),
+            best_state_dict_cpu=None,
+            oof_logits={},
+            oof_targets={},
+            oof_sample_indices=list(payload.get("oof_sample_indices", [])),
+            report_results=copy.deepcopy(payload.get("report_results")),
+            log_file=payload.get("log_file"),
+            tensor_artifact_path=payload.get("tensor_artifact_path"),
+            best_state_dict_cpu_summary=copy.deepcopy(payload.get("best_state_dict_cpu")),
+            oof_logits_summary=copy.deepcopy(payload.get("oof_logits", {})),
+            oof_targets_summary=copy.deepcopy(payload.get("oof_targets", {})),
+        )
+
 
 @dataclass
 class OptunaTrialResult:
@@ -423,6 +443,30 @@ class OptunaTrialResult:
 
     def folds_to_dataframe(self) -> pd.DataFrame:
         return pd.DataFrame([fr.leaderboard_row() for fr in self.fold_results])
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "OptunaTrialResult":
+        return cls(
+            trial_number=int(payload.get("trial_number", -1)),
+            params=copy.deepcopy(payload.get("params", {})),
+            status=payload.get("status", "FAILED"),
+            aggregate_metric=payload.get("aggregate_metric"),
+            aggregate_selection_score=payload.get("aggregate_selection_score"),
+            intermediate_reports=copy.deepcopy(payload.get("intermediate_reports", [])),
+            pruned_epoch=payload.get("pruned_epoch"),
+            fold_results=[
+                FoldResult.from_dict(fr_payload)
+                for fr_payload in payload.get("fold_results", [])
+            ],
+            aggregate_fold_report_results=copy.deepcopy(payload.get("aggregate_fold_report_results")),
+            log_file=payload.get("log_file"),
+            aggregate_oof_sample_indices=list(payload.get("aggregate_oof_sample_indices", [])),
+            error_message=payload.get("error_message"),
+            error_traceback=payload.get("error_traceback"),
+            aggregate_tensor_artifact_path=payload.get("aggregate_tensor_artifact_path"),
+            aggregate_oof_logits_summary=copy.deepcopy(payload.get("aggregate_oof_logits", {})),
+            aggregate_oof_targets_summary=copy.deepcopy(payload.get("aggregate_oof_targets", {})),
+        )
 
 
 @dataclass
@@ -726,6 +770,74 @@ class OptunaSearchCVResult:
         row.update({f"best_param.{k}": v for k, v in self.best_params.items()})
         return row
 
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "OptunaSearchCVResult":
+        return cls(
+            search_pool_indices=list(payload.get("search_pool_indices", [])),
+            trial_results=[
+                OptunaTrialResult.from_dict(tr_payload)
+                for tr_payload in payload.get("trial_results", [])
+            ],
+            best_params=copy.deepcopy(payload.get("best_params", {})),
+            best_metric=payload.get("best_metric", 0.0),
+            best_selection_score=payload.get("best_selection_score", 0.0),
+            best_trial_number=int(payload.get("best_trial_number", -1)),
+            attempted_trials=int(payload.get("attempted_trials", 0)),
+            successful_trials=int(payload.get("successful_trials", 0)),
+            failed_trials=int(payload.get("failed_trials", 0)),
+            pruned_trials=int(payload.get("pruned_trials", 0)),
+            selected_fold_results=[
+                FoldResult.from_dict(fr_payload)
+                for fr_payload in payload.get("selected_fold_results", [])
+            ],
+            selected_fold_report_results=copy.deepcopy(payload.get("selected_fold_report_results")),
+            selected_fold_report_results_raw=copy.deepcopy(payload.get("selected_fold_report_results_raw")),
+            selected_metric_mean=payload.get("selected_metric_mean"),
+            selected_metric_std=payload.get("selected_metric_std"),
+            selected_metric_min=payload.get("selected_metric_min"),
+            selected_metric_max=payload.get("selected_metric_max"),
+            selection_diagnostics=copy.deepcopy(payload.get("selection_diagnostics")),
+            selected_competence_summary=copy.deepcopy(payload.get("selected_competence_summary")),
+            fold_best_epochs=copy.deepcopy(payload.get("fold_best_epochs")),
+            final_model_spec=copy.deepcopy(payload.get("final_model_spec")),
+            final_trainer_spec=copy.deepcopy(payload.get("final_trainer_spec")),
+            final_fit_epochs=payload.get("final_fit_epochs"),
+            final_epochs_ran=payload.get("final_epochs_ran"),
+            final_best_epoch=payload.get("final_best_epoch"),
+            final_best_metric=payload.get("final_best_metric"),
+            final_train_logs=copy.deepcopy(payload.get("final_train_logs", [])),
+            final_val_logs=copy.deepcopy(payload.get("final_val_logs", [])),
+            final_history=copy.deepcopy(payload.get("final_history", [])),
+            final_model_state_dict_cpu=None,
+            final_model_state_dict_path=payload.get("final_model_state_dict_path"),
+            holdout_metrics=copy.deepcopy(payload.get("holdout_metrics")),
+            holdout_metrics_by_phase=copy.deepcopy(payload.get("holdout_metrics_by_phase")),
+            holdout_report_results=copy.deepcopy(payload.get("holdout_report_results")),
+            holdout_report_results_by_phase=copy.deepcopy(payload.get("holdout_report_results_by_phase")),
+            holdout_posthoc_results=copy.deepcopy(payload.get("holdout_posthoc_results")),
+            final_posthoc_module_summary=copy.deepcopy(payload.get("final_posthoc_module_summary")),
+            base_model_spec=copy.deepcopy(payload.get("base_model_spec")),
+            base_trainer_spec=copy.deepcopy(payload.get("base_trainer_spec")),
+            parameter_grid=copy.deepcopy(payload.get("parameter_grid")),
+            report_evaluator=copy.deepcopy(payload.get("report_evaluator")),
+            posthoc_hooks=copy.deepcopy(payload.get("posthoc_hooks")),
+            log_dir=payload.get("log_dir"),
+            run_log_file=payload.get("run_log_file"),
+            final_refit_log_file=payload.get("final_refit_log_file"),
+            splitter_name=payload.get("splitter_name", ""),
+            n_splits=int(payload.get("n_splits", 0)),
+            shuffle=bool(payload.get("shuffle", False)),
+            random_state=payload.get("random_state"),
+            n_trials=int(payload.get("n_trials", 0)),
+            max_trial_attempts=int(payload.get("max_trial_attempts", 0)),
+            calibrate=bool(payload.get("calibrate", True)),
+            final_model_dir=payload.get("final_model_dir"),
+            keep_final_model_state_dict_cpu=bool(payload.get("keep_final_model_state_dict_cpu", True)),
+            selection_metric_name=payload.get("selection_metric_name", ""),
+            selection_metric_direction=payload.get("selection_metric_direction", "maximize"),
+            selection_metric_spec=copy.deepcopy(payload.get("selection_metric_spec", {})),
+        )
+
 
 @dataclass
 class OuterFoldResult:
@@ -804,6 +916,26 @@ class OuterFoldResult:
 
         row.update({f"inner.{k}": v for k, v in self.inner_search_result.leaderboard_row().items()})
         return row
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "OuterFoldResult":
+        inner_payload = payload.get("inner_search_result")
+        if inner_payload is None:
+            raise ValueError("OuterFoldResult.from_dict requires an 'inner_search_result' payload.")
+
+        return cls(
+            fold=int(payload.get("fold", 0)),
+            outer_train_indices=list(payload.get("outer_train_indices", [])),
+            outer_test_indices=list(payload.get("outer_test_indices", [])),
+            inner_search_result=OptunaSearchCVResult.from_dict(inner_payload),
+            outer_test_metrics=copy.deepcopy(payload.get("outer_test_metrics")),
+            outer_test_metrics_by_phase=copy.deepcopy(payload.get("outer_test_metrics_by_phase")),
+            outer_test_report_results=copy.deepcopy(payload.get("outer_test_report_results")),
+            outer_test_report_results_by_phase=copy.deepcopy(payload.get("outer_test_report_results_by_phase")),
+            outer_test_posthoc_results=copy.deepcopy(payload.get("outer_test_posthoc_results")),
+            outer_test_posthoc_module_summary=copy.deepcopy(payload.get("outer_test_posthoc_module_summary")),
+            log_file=payload.get("log_file"),
+        )
 
 
 @dataclass
@@ -966,3 +1098,36 @@ class NestedOptunaSearchCVResult:
                     row[f"outer_test.{k}.std"] = 0.0
 
         return row
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "NestedOptunaSearchCVResult":
+        return cls(
+            outer_results=[
+                OuterFoldResult.from_dict(outer_payload)
+                for outer_payload in payload.get("outer_results", [])
+            ],
+            base_model_spec=copy.deepcopy(payload.get("base_model_spec")),
+            base_trainer_spec=copy.deepcopy(payload.get("base_trainer_spec")),
+            parameter_grid=copy.deepcopy(payload.get("parameter_grid")),
+            report_evaluator=copy.deepcopy(payload.get("report_evaluator")),
+            outer_report_results=copy.deepcopy(payload.get("outer_report_results")),
+            outer_posthoc_results=copy.deepcopy(payload.get("outer_posthoc_results")),
+            posthoc_hooks=copy.deepcopy(payload.get("posthoc_hooks")),
+            log_dir=payload.get("log_dir"),
+            run_log_file=payload.get("run_log_file"),
+            outer_splitter_name=payload.get("outer_splitter_name", ""),
+            inner_splitter_name=payload.get("inner_splitter_name", ""),
+            k_outer=int(payload.get("k_outer", 0)),
+            k_inner=int(payload.get("k_inner", 0)),
+            shuffle_outer=bool(payload.get("shuffle_outer", False)),
+            shuffle_inner=bool(payload.get("shuffle_inner", False)),
+            random_state=payload.get("random_state"),
+            n_trials=int(payload.get("n_trials", 0)),
+            max_trial_attempts=int(payload.get("max_trial_attempts", 0)),
+            calibrate=bool(payload.get("calibrate", True)),
+            final_model_dir=payload.get("final_model_dir"),
+            keep_final_model_state_dict_cpu=bool(payload.get("keep_final_model_state_dict_cpu", True)),
+            selection_metric_name=payload.get("selection_metric_name", ""),
+            selection_metric_direction=payload.get("selection_metric_direction", "maximize"),
+            selection_metric_spec=copy.deepcopy(payload.get("selection_metric_spec", {})),
+        )
