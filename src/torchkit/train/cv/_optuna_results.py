@@ -6,6 +6,7 @@ from typing import Any, Optional
 
 import copy
 import json
+import os
 
 import pandas as pd
 import torch
@@ -28,6 +29,10 @@ def _tensor_summary(x: torch.Tensor) -> dict[str, Any]:
 
 def _tensor_dict_summary(d: dict[str, torch.Tensor]) -> dict[str, Any]:
     return {k: _tensor_summary(v) for k, v in d.items()}
+
+
+def _clone_tensor_dict_for_storage(d: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    return {k: v.detach().cpu().clone() for k, v in d.items()}
 
 
 def _is_json_primitive(x: Any) -> bool:
@@ -178,8 +183,76 @@ class FoldResult:
     oof_sample_indices: list[int] = field(default_factory=list)
     report_results: Optional[dict[str, Any]] = None
     log_file: Optional[str] = None
+    tensor_artifact_path: Optional[str] = None
+    best_state_dict_cpu_summary: Optional[dict[str, Any]] = None
+    oof_logits_summary: dict[str, Any] = field(default_factory=dict)
+    oof_targets_summary: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self._refresh_tensor_summaries()
+
+    def _refresh_tensor_summaries(self) -> None:
+        if self.best_state_dict_cpu is not None:
+            self.best_state_dict_cpu_summary = _tensor_dict_summary(self.best_state_dict_cpu)
+        elif self.best_state_dict_cpu_summary is None:
+            self.best_state_dict_cpu_summary = None
+
+        if self.oof_logits:
+            self.oof_logits_summary = _tensor_dict_summary(self.oof_logits)
+        elif not self.oof_logits_summary:
+            self.oof_logits_summary = {}
+
+        if self.oof_targets:
+            self.oof_targets_summary = _tensor_dict_summary(self.oof_targets)
+        elif not self.oof_targets_summary:
+            self.oof_targets_summary = {}
+
+    def has_in_memory_tensors(self) -> bool:
+        return (
+            self.best_state_dict_cpu is not None
+            or bool(self.oof_logits)
+            or bool(self.oof_targets)
+        )
+
+    def hydrate_tensors(self) -> None:
+        if self.has_in_memory_tensors() or self.tensor_artifact_path is None:
+            self._refresh_tensor_summaries()
+            return
+
+        payload = torch.load(self.tensor_artifact_path, map_location="cpu")
+        best_state_dict_cpu = payload.get("best_state_dict_cpu")
+        self.best_state_dict_cpu = (
+            None if best_state_dict_cpu is None else _clone_tensor_dict_for_storage(best_state_dict_cpu)
+        )
+        self.oof_logits = _clone_tensor_dict_for_storage(dict(payload.get("oof_logits", {})))
+        self.oof_targets = _clone_tensor_dict_for_storage(dict(payload.get("oof_targets", {})))
+        self._refresh_tensor_summaries()
+
+    def spill_tensors(self, path: str, *, release_memory: bool = True) -> None:
+        self._refresh_tensor_summaries()
+        payload = {
+            "best_state_dict_cpu": (
+                None
+                if self.best_state_dict_cpu is None
+                else _clone_tensor_dict_for_storage(self.best_state_dict_cpu)
+            ),
+            "oof_logits": _clone_tensor_dict_for_storage(self.oof_logits),
+            "oof_targets": _clone_tensor_dict_for_storage(self.oof_targets),
+        }
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        torch.save(payload, path)
+        self.tensor_artifact_path = path
+        if release_memory:
+            self.best_state_dict_cpu = None
+            self.oof_logits = {}
+            self.oof_targets = {}
 
     def to_dict(self, *, include_tensors: bool = False) -> dict[str, Any]:
+        if include_tensors:
+            self.hydrate_tensors()
+        else:
+            self._refresh_tensor_summaries()
+
         out = {
             "fold": self.fold,
             "train_indices": copy.deepcopy(self.train_indices),
@@ -191,6 +264,7 @@ class FoldResult:
             "log_file": self.log_file,
             "n_train": len(self.train_indices),
             "n_val": len(self.val_indices),
+            "tensor_artifact_path": self.tensor_artifact_path,
         }
 
         if include_tensors:
@@ -200,12 +274,9 @@ class FoldResult:
             out["oof_logits"] = {k: v.detach().cpu().clone() for k, v in self.oof_logits.items()}
             out["oof_targets"] = {k: v.detach().cpu().clone() for k, v in self.oof_targets.items()}
         else:
-            out["best_state_dict_cpu"] = (
-                None if self.best_state_dict_cpu is None
-                else _tensor_dict_summary(self.best_state_dict_cpu)
-            )
-            out["oof_logits"] = _tensor_dict_summary(self.oof_logits)
-            out["oof_targets"] = _tensor_dict_summary(self.oof_targets)
+            out["best_state_dict_cpu"] = copy.deepcopy(self.best_state_dict_cpu_summary)
+            out["oof_logits"] = copy.deepcopy(self.oof_logits_summary)
+            out["oof_targets"] = copy.deepcopy(self.oof_targets_summary)
 
         return out
 
@@ -241,6 +312,56 @@ class OptunaTrialResult:
 
     error_message: Optional[str] = None
     error_traceback: Optional[str] = None
+    aggregate_tensor_artifact_path: Optional[str] = None
+    aggregate_oof_logits_summary: dict[str, Any] = field(default_factory=dict)
+    aggregate_oof_targets_summary: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self._refresh_tensor_summaries()
+
+    def _refresh_tensor_summaries(self) -> None:
+        if self.aggregate_oof_logits:
+            self.aggregate_oof_logits_summary = _tensor_dict_summary(self.aggregate_oof_logits)
+        elif not self.aggregate_oof_logits_summary:
+            self.aggregate_oof_logits_summary = {}
+
+        if self.aggregate_oof_targets:
+            self.aggregate_oof_targets_summary = _tensor_dict_summary(self.aggregate_oof_targets)
+        elif not self.aggregate_oof_targets_summary:
+            self.aggregate_oof_targets_summary = {}
+
+    def hydrate_tensors(self) -> None:
+        for fold_result in self.fold_results:
+            fold_result.hydrate_tensors()
+
+        if self.aggregate_oof_logits or self.aggregate_oof_targets or self.aggregate_tensor_artifact_path is None:
+            self._refresh_tensor_summaries()
+            return
+
+        payload = torch.load(self.aggregate_tensor_artifact_path, map_location="cpu")
+        self.aggregate_oof_logits = _clone_tensor_dict_for_storage(dict(payload.get("aggregate_oof_logits", {})))
+        self.aggregate_oof_targets = _clone_tensor_dict_for_storage(dict(payload.get("aggregate_oof_targets", {})))
+        self._refresh_tensor_summaries()
+
+    def spill_tensors(self, artifact_dir: str, *, release_memory: bool = True) -> None:
+        Path(artifact_dir).mkdir(parents=True, exist_ok=True)
+        for fold_result in self.fold_results:
+            fold_result.spill_tensors(
+                os.path.join(artifact_dir, f"fold_{fold_result.fold:03d}_tensors.pt"),
+                release_memory=release_memory,
+            )
+
+        self._refresh_tensor_summaries()
+        aggregate_path = os.path.join(artifact_dir, "aggregate_oof_tensors.pt")
+        payload = {
+            "aggregate_oof_logits": _clone_tensor_dict_for_storage(self.aggregate_oof_logits),
+            "aggregate_oof_targets": _clone_tensor_dict_for_storage(self.aggregate_oof_targets),
+        }
+        torch.save(payload, aggregate_path)
+        self.aggregate_tensor_artifact_path = aggregate_path
+        if release_memory:
+            self.aggregate_oof_logits = {}
+            self.aggregate_oof_targets = {}
 
     def to_dict(
         self,
@@ -248,6 +369,11 @@ class OptunaTrialResult:
         include_tensors: bool = False,
         include_traceback: bool = False,
     ) -> dict[str, Any]:
+        if include_tensors:
+            self.hydrate_tensors()
+        else:
+            self._refresh_tensor_summaries()
+
         out = {
             "trial_number": self.trial_number,
             "params": copy.deepcopy(self.params),
@@ -260,6 +386,7 @@ class OptunaTrialResult:
             "log_file": self.log_file,
             "aggregate_oof_sample_indices": copy.deepcopy(self.aggregate_oof_sample_indices),
             "error_message": self.error_message,
+            "aggregate_tensor_artifact_path": self.aggregate_tensor_artifact_path,
             "fold_results": [fr.to_dict(include_tensors=include_tensors) for fr in self.fold_results],
         }
 
@@ -274,8 +401,8 @@ class OptunaTrialResult:
                 k: v.detach().cpu().clone() for k, v in self.aggregate_oof_targets.items()
             }
         else:
-            out["aggregate_oof_logits"] = _tensor_dict_summary(self.aggregate_oof_logits)
-            out["aggregate_oof_targets"] = _tensor_dict_summary(self.aggregate_oof_targets)
+            out["aggregate_oof_logits"] = copy.deepcopy(self.aggregate_oof_logits_summary)
+            out["aggregate_oof_targets"] = copy.deepcopy(self.aggregate_oof_targets_summary)
 
         return out
 
@@ -423,11 +550,13 @@ class OptunaSearchCVResult:
 
     def selected_trial_result(self) -> OptunaTrialResult:
         try:
-            return next(tr for tr in self.trial_results if tr.trial_number == self.best_trial_number)
+            selected = next(tr for tr in self.trial_results if tr.trial_number == self.best_trial_number)
         except StopIteration as e:
             raise ValueError(
                 f"Best trial number {self.best_trial_number} not found in stored trial_results."
             ) from e
+        selected.hydrate_tensors()
+        return selected
 
     def to_dict(
         self,
