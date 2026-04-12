@@ -337,6 +337,11 @@ class InMemoryOptunaSearchCV(OptunaSearchCV):
                         fold_runner.last_selection_score = float(event.selection_score)
                         validation_epochs.add(int(event.epoch))
 
+                if strategy is not None:
+                    # Keep all ranks at the same trial-sync boundary before any rank
+                    # starts the next epoch step, prunes, or exits the trial loop.
+                    strategy.barrier()
+
                 if not progressed:
                     break
 
@@ -385,6 +390,8 @@ class InMemoryOptunaSearchCV(OptunaSearchCV):
                 if strategy is not None:
                     should_prune = bool(strategy.broadcast_object(should_prune, src=0))
                 if should_prune:
+                    if strategy is not None:
+                        strategy.barrier()
                     raise _PrunedTrialWithResult(
                         self._collect_trial_result(
                             trial=type("_TrialView", (), {"number": trial_number})(),
@@ -400,6 +407,8 @@ class InMemoryOptunaSearchCV(OptunaSearchCV):
                         message=f"Trial pruned at epoch {sync_epoch}.",
                     )
 
+            if strategy is not None:
+                strategy.barrier()
             return self._collect_trial_result(
                 trial=type("_TrialView", (), {"number": trial_number})(),
                 params=params,
