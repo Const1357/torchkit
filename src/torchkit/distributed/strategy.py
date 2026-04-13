@@ -102,6 +102,9 @@ class DDPStrategy:
     def barrier(self) -> None:
         if not self.is_enabled:
             return
+        if self.config.backend.lower() == "nccl":
+            dist.barrier(group=self.process_group, device_ids=[self.context.local_rank])
+            return
         dist.barrier(group=self.process_group)
 
     def _collective_device(self) -> torch.device:

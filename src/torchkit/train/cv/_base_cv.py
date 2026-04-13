@@ -418,6 +418,33 @@ class BaseCV:
             dataloader_factory=lambda ds: self.dataloader_factory(ds, False),
         )
 
+    def _evaluate_report_distributed_safe(
+        self,
+        trainer: Trainer,
+        dataset_subset: Subset | Dataset,
+    ) -> Optional[dict[str, Any]]:
+        if self.report_evaluator is None:
+            return None
+
+        strategy = getattr(trainer, "distributed_strategy", None)
+        if strategy is None or not strategy.is_enabled:
+            return self._evaluate_report(trainer, dataset_subset)
+
+        report_results = None
+        if strategy.is_main_process:
+            report_results = evaluate_model(
+                trainer.model,
+                dataset_subset,
+                self.report_evaluator,
+                device=trainer.device,
+                backbone_kwargs=trainer.config.backbone_kwargs,
+                head_kwargs=trainer.config.head_kwargs,
+                use_amp=trainer.config.use_amp,
+                dataloader_factory=lambda ds: DataLoader(ds, batch_size=1, shuffle=False),
+            )
+
+        return strategy.broadcast_object(report_results, src=0)
+
     def _fit_posthoc_modules_from_oof(
         self,
         model: Any,
@@ -536,7 +563,7 @@ class BaseCV:
             "raw": self._evaluate_holdout(trainer, dataset_subset),
         }
         report_by_phase: Optional[dict[str, dict[str, Any]]] = None
-        raw_report = self._evaluate_report(trainer, dataset_subset)
+        raw_report = self._evaluate_report_distributed_safe(trainer, dataset_subset)
         if raw_report is not None:
             report_by_phase = {"raw": raw_report}
 
@@ -546,7 +573,7 @@ class BaseCV:
             oof_targets=oof_targets,
         )
         metrics_by_phase["calibrated"] = self._evaluate_holdout(trainer, dataset_subset)
-        calibrated_report = self._evaluate_report(trainer, dataset_subset)
+        calibrated_report = self._evaluate_report_distributed_safe(trainer, dataset_subset)
         if report_by_phase is not None and calibrated_report is not None:
             report_by_phase["calibrated"] = calibrated_report
 
@@ -556,7 +583,7 @@ class BaseCV:
             oof_targets=oof_targets,
         )
         metrics_by_phase["posthoc_full"] = self._evaluate_holdout(trainer, dataset_subset)
-        posthoc_report = self._evaluate_report(trainer, dataset_subset)
+        posthoc_report = self._evaluate_report_distributed_safe(trainer, dataset_subset)
         if report_by_phase is not None and posthoc_report is not None:
             report_by_phase["posthoc_full"] = posthoc_report
 

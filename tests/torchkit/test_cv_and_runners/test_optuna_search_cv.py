@@ -17,7 +17,6 @@ from torchkit.models.Model.factory import TorchkitModelFactory
 from torchkit.train.cv._optuna_search_mixin import ParameterGrid
 from torchkit.train.cv.optuna_search_cv import OptunaSearchCV
 from torchkit.train.cv._optuna_results import OptunaSearchCVResult, OptunaTrialResult
-from torchkit.train.cv._optuna_search_mixin import TrialStatus
 
 from tests.torchkit.test_cv_and_runners.conftest import (
     ErrorRateEvaluator,
@@ -33,8 +32,10 @@ class _RecordingDistributedStrategy:
         self.is_main_process = is_main_process
         self._scripted_commands = list(scripted_commands or [])
         self.broadcast_calls: list[object] = []
+        self.barrier_calls = 0
         self.initialize_calls = 0
         self.finalize_calls = 0
+        self.operation_log: list[str] = []
 
     def initialize(self) -> None:
         self.initialize_calls += 1
@@ -46,10 +47,21 @@ class _RecordingDistributedStrategy:
         _ = src
         self.broadcast_calls.append(copy.deepcopy(obj))
         if self.is_main_process:
-            return copy.deepcopy(obj)
-        if not self._scripted_commands:
-            raise AssertionError("Expected a scripted distributed command.")
-        return copy.deepcopy(self._scripted_commands.pop(0))
+            result = copy.deepcopy(obj)
+        else:
+            if not self._scripted_commands:
+                raise AssertionError("Expected a scripted distributed command.")
+            result = copy.deepcopy(self._scripted_commands.pop(0))
+
+        if isinstance(result, dict) and "type" in result:
+            self.operation_log.append(f"broadcast:{result['type']}")
+        else:
+            self.operation_log.append(f"broadcast:{type(result).__name__}")
+        return result
+
+    def barrier(self) -> None:
+        self.barrier_calls += 1
+        self.operation_log.append("barrier")
 
 
 class _AlwaysPruningDistributedOptunaSearchCV(OptunaSearchCV):
@@ -113,10 +125,16 @@ class _SuccessThenPruneDistributedOptunaSearchCV(OptunaSearchCV):
         return OptunaTrialResult(
             trial_number=trial_number,
             params=copy.deepcopy(params),
-            status=TrialStatus.SUCCESS,
+            status="SUCCESS",
             aggregate_metric=1.0,
             aggregate_selection_score=1.0,
         )
+
+
+class _SuccessThenPruneThenAbortDistributedOptunaSearchCV(_SuccessThenPruneDistributedOptunaSearchCV):
+    def _build_trainer_for_trial(self, *, params):
+        _ = params
+        raise RuntimeError("stop after distributed search loop")
 
 
 def test_optuna_search_cv_rejects_unrebuildable_final_model_configuration():
@@ -841,7 +859,9 @@ def test_optuna_search_cv_distributed_main_rank_broadcasts_stop_before_budget_ex
     )
     assert strategy.initialize_calls == 1
     assert strategy.finalize_calls == 1
+    assert strategy.barrier_calls == 1
     assert [command["type"] for command in strategy.broadcast_calls] == ["trial", "stop"]
+    assert strategy.operation_log == ["broadcast:trial", "barrier", "broadcast:stop"]
 
 
 def test_optuna_search_cv_distributed_worker_rank_raises_when_budget_exhausts_without_completed_trials(
@@ -901,7 +921,59 @@ def test_optuna_search_cv_distributed_worker_rank_raises_when_budget_exhausts_wi
     assert str(exc_info.value) == error_message
     assert strategy.initialize_calls == 1
     assert strategy.finalize_calls == 1
+    assert strategy.barrier_calls == 1
     assert strategy.broadcast_calls == [None, None]
+    assert strategy.operation_log == ["broadcast:trial", "barrier", "broadcast:stop"]
+
+
+def test_optuna_search_cv_distributed_waits_at_trial_boundary_before_broadcasting_next_command(
+    tiny_dataset,
+    tiny_labels_groups,
+    tmp_path,
+):
+    y, _groups = tiny_labels_groups
+
+    base_strategy = _RecordingDistributedStrategy(is_main_process=True)
+    trainer_spec = make_trainer_spec(
+        evaluator=AccuracySelectorEvaluator(
+            score_key="clf/logits",
+            target_key="batch/y",
+            name="classification",
+        ),
+        max_epochs=1,
+    )
+    trainer_spec.distributed_strategy = base_strategy
+
+    cv = _SuccessThenPruneThenAbortDistributedOptunaSearchCV(
+        model_spec=make_model_spec(scale_factor=1.0),
+        trainer_spec=trainer_spec,
+        parameter_grid=ParameterGrid.from_simple({"model/backbone/kwargs/scale_factor": ([1.0], "categorical")}),
+        splitter_cls=StratifiedKFold,
+        dataloader_factory=lambda ds, shuffle: torch.utils.data.DataLoader(ds, batch_size=2, shuffle=shuffle),
+        n_trials=2,
+        max_trial_attempts=2,
+        n_splits=2,
+        shuffle=False,
+        random_state=None,
+        calibrate=True,
+        final_model_dir=str(tmp_path),
+        keep_final_model_state_dict_cpu=True,
+    )
+    strategy = cv.trainer_spec.distributed_strategy
+
+    with pytest.raises(RuntimeError, match="stop after distributed search loop"):
+        cv.run(tiny_dataset, index=y, groups=None)
+
+    assert strategy.initialize_calls == 1
+    assert strategy.finalize_calls == 1
+    assert strategy.barrier_calls == 2
+    assert strategy.operation_log[:5] == [
+        "broadcast:trial",
+        "barrier",
+        "broadcast:trial",
+        "barrier",
+        "broadcast:stop",
+    ]
 
 
 def test_optuna_search_cv_returns_best_completed_trial_when_budget_exhausts_before_target(

@@ -135,7 +135,7 @@ class InMemoryOptunaSearchCV(OptunaSearchCV):
         trainer = fold_runner.trainer
         if trainer is None:
             raise RuntimeError(f"Fold {fold_runner.fold} trainer has already been released.")
-        fold_report_results = self._evaluate_report(trainer, fold_runner.val_subset)
+        fold_report_results = self._evaluate_report_distributed_safe(trainer, fold_runner.val_subset)
         metric = trainer.state.best_metric
         if metric is not None:
             metric = float(metric)

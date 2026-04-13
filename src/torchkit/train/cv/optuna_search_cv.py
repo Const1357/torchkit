@@ -220,7 +220,7 @@ class OptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
                     trial=None,
                 )
 
-                fold_report_results = self._evaluate_report(trainer, val_subset)
+                fold_report_results = self._evaluate_report_distributed_safe(trainer, val_subset)
 
                 metric = trainer.state.best_metric
                 if metric is not None:
@@ -585,95 +585,100 @@ class OptunaSearchCV(OptunaSearchMixin, BaseSearchCV):
                     if command["type"] == "stop":
                         break
 
-                    trial_number = int(command["trial_number"])
-                    params = copy.deepcopy(command["params"])
-                    attempted_trials += 1
-
                     try:
-                        trial_result = self._run_single_trial_with_params(
-                            trial_number=trial_number,
-                            params=params,
-                            search_dataset=dataset,
-                            search_index=search_index,
-                            search_groups=search_groups,
-                            search_original_indices=search_original_indices,
-                            trial=trial,
-                        )
-                        assert trial_result.aggregate_selection_score is not None
-                        if is_main_process:
-                            assert study is not None
-                            assert trial is not None
-                            study.tell(trial, trial_result.aggregate_selection_score)
-                        trial_results.append(trial_result)
-                        successful_trials += 1
-                        if run_logger is not None:
-                            run_logger.emit(
-                                "cv_trial_recorded",
-                                payload={
-                                    "trial_number": trial_result.trial_number,
-                                    "status": trial_result.status,
-                                    "aggregate_metric": trial_result.aggregate_metric,
-                                    "aggregate_selection_score": trial_result.aggregate_selection_score,
-                                    "trial_log_file": trial_result.log_file,
-                                },
-                                message=(
-                                    f"Recorded successful trial {trial_result.trial_number} "
-                                    f"(aggregate_metric={trial_result.aggregate_metric}, "
-                                    f"trial_log={trial_result.log_file})."
-                                ),
-                            )
+                        trial_number = int(command["trial_number"])
+                        params = copy.deepcopy(command["params"])
+                        attempted_trials += 1
 
-                    except optuna.TrialPruned as e:
-                        tb = traceback.format_exc()
-                        if is_main_process:
-                            assert study is not None
-                            assert trial is not None
-                            study.tell(trial, state=TrialState.PRUNED)
-                        pruned_result = self._build_pruned_trial_result(
-                            trial_number=trial_number,
-                            params=params,
-                            exception=e,
-                            traceback_text=tb,
-                        )
-                        trial_results.append(pruned_result)
-                        pruned_trials += 1
-                        if run_logger is not None:
-                            run_logger.emit(
-                                "cv_trial_recorded",
-                                payload={
-                                    "trial_number": trial_number,
-                                    "status": "PRUNED",
-                                    "error_message": str(e),
-                                    "trial_log_file": pruned_result.log_file,
-                                },
-                                message=f"Trial {trial_number} pruned: {e}",
+                        try:
+                            trial_result = self._run_single_trial_with_params(
+                                trial_number=trial_number,
+                                params=params,
+                                search_dataset=dataset,
+                                search_index=search_index,
+                                search_groups=search_groups,
+                                search_original_indices=search_original_indices,
+                                trial=trial,
                             )
+                            assert trial_result.aggregate_selection_score is not None
+                            if is_main_process:
+                                assert study is not None
+                                assert trial is not None
+                                study.tell(trial, trial_result.aggregate_selection_score)
+                            trial_results.append(trial_result)
+                            successful_trials += 1
+                            if run_logger is not None:
+                                run_logger.emit(
+                                    "cv_trial_recorded",
+                                    payload={
+                                        "trial_number": trial_result.trial_number,
+                                        "status": trial_result.status,
+                                        "aggregate_metric": trial_result.aggregate_metric,
+                                        "aggregate_selection_score": trial_result.aggregate_selection_score,
+                                        "trial_log_file": trial_result.log_file,
+                                    },
+                                    message=(
+                                        f"Recorded successful trial {trial_result.trial_number} "
+                                        f"(aggregate_metric={trial_result.aggregate_metric}, "
+                                        f"trial_log={trial_result.log_file})."
+                                    ),
+                                )
 
-                    except Exception as e:
-                        tb = traceback.format_exc()
-                        if is_main_process:
-                            assert study is not None
-                            assert trial is not None
-                            study.tell(trial, state=TrialState.FAIL)
-                        failed_result = self._build_failed_trial_result(
-                            trial_number=trial_number,
-                            params=params,
-                            exception=e,
-                            traceback_text=tb,
-                        )
-                        trial_results.append(failed_result)
-                        failed_trials += 1
-                        if run_logger is not None:
-                            run_logger.emit(
-                                "cv_trial_recorded",
-                                payload={
-                                    "trial_number": trial_number,
-                                    "status": "FAILED",
-                                    "error_message": f"{type(e).__name__}: {e}",
-                                    "trial_log_file": failed_result.log_file,
-                                },
-                                message=f"Trial {trial_number} failed with {type(e).__name__}: {e}",
+                        except optuna.TrialPruned as e:
+                            tb = traceback.format_exc()
+                            if is_main_process:
+                                assert study is not None
+                                assert trial is not None
+                                study.tell(trial, state=TrialState.PRUNED)
+                            pruned_result = self._build_pruned_trial_result(
+                                trial_number=trial_number,
+                                params=params,
+                                exception=e,
+                                traceback_text=tb,
                             )
+                            trial_results.append(pruned_result)
+                            pruned_trials += 1
+                            if run_logger is not None:
+                                run_logger.emit(
+                                    "cv_trial_recorded",
+                                    payload={
+                                        "trial_number": trial_number,
+                                        "status": "PRUNED",
+                                        "error_message": str(e),
+                                        "trial_log_file": pruned_result.log_file,
+                                    },
+                                    message=f"Trial {trial_number} pruned: {e}",
+                                )
+
+                        except Exception as e:
+                            tb = traceback.format_exc()
+                            if is_main_process:
+                                assert study is not None
+                                assert trial is not None
+                                study.tell(trial, state=TrialState.FAIL)
+                            failed_result = self._build_failed_trial_result(
+                                trial_number=trial_number,
+                                params=params,
+                                exception=e,
+                                traceback_text=tb,
+                            )
+                            trial_results.append(failed_result)
+                            failed_trials += 1
+                            if run_logger is not None:
+                                run_logger.emit(
+                                    "cv_trial_recorded",
+                                    payload={
+                                        "trial_number": trial_number,
+                                        "status": "FAILED",
+                                        "error_message": f"{type(e).__name__}: {e}",
+                                        "trial_log_file": failed_result.log_file,
+                                    },
+                                    message=f"Trial {trial_number} failed with {type(e).__name__}: {e}",
+                                )
+                    finally:
+                        # Keep all ranks at the same trial boundary before the next
+                        # command broadcast so trial-finalization work cannot race ahead.
+                        strategy.barrier()
 
             if attempted_trials >= self.max_trial_attempts and successful_trials < self.n_trials:
                 if run_logger is not None:

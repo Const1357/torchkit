@@ -8,11 +8,14 @@ import optuna
 import pytest
 import torch
 import torch.multiprocessing as mp
+import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
 from torchkit.data.split import StratifiedKFold
 from torchkit.distributed import DDPStrategy, DistributedConfig, DistributedContext
+from torchkit.evaluate.report import CompositeReportEvaluator
+from torchkit.evaluate.report.bundle import BundleReportEvaluator
 from torchkit.evaluate.select import AccuracySelectorEvaluator
 from torchkit.evaluate.select.bundle import BundleSelectorEvaluator
 from torchkit.objectives.relational import CELoss
@@ -29,6 +32,7 @@ from .test_trainer import (
     make_classification_model,
 )
 from .test_cv_and_runners.conftest import (
+    AccuracyReportEvaluator,
     TinyClassificationDataset,
     make_labels_and_groups,
     make_model_spec,
@@ -458,6 +462,99 @@ def _distributed_exhausted_search_worker(rank: int, world_size: int, init_method
         strategy.finalize()
 
 
+def _distributed_report_worker(rank: int, world_size: int, init_method: str, output_dir: str) -> None:
+    _configure_rank_env(rank=rank, world_size=world_size)
+    strategy = DDPStrategy(
+        config=DistributedConfig(
+            enabled=True,
+            backend="gloo",
+            init_method=init_method,
+        ),
+        context=DistributedContext.from_env(),
+    )
+
+    trainer_spec = make_trainer_spec(
+        evaluator=AccuracySelectorEvaluator(
+            score_key="clf/logits",
+            target_key="batch/y",
+            name="classification",
+        ),
+        max_epochs=1,
+    )
+    trainer_spec.config.device = "cpu"
+    trainer_spec.distributed_strategy = strategy
+
+    report_evaluator = BundleReportEvaluator(
+        dataset_evaluator=CompositeReportEvaluator(
+            [
+                AccuracyReportEvaluator(
+                    score_key="clf/logits",
+                    target_key="batch/y",
+                    name="clf",
+                )
+            ],
+            name="report_bundle",
+        ),
+    )
+
+    def dataloader_factory(ds, shuffle):
+        sampler = DistributedSampler(
+            ds,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=shuffle,
+            drop_last=False,
+        )
+        return DataLoader(ds, batch_size=2, sampler=sampler, shuffle=False)
+
+    cv = InMemoryOptunaSearchCV(
+        model_spec=make_model_spec(scale_factor=1.0),
+        trainer_spec=trainer_spec,
+        parameter_grid=ParameterGrid.from_simple(
+            {"model/backbone/kwargs/scale_factor": ([1.0], "categorical")}
+        ),
+        splitter_cls=StratifiedKFold,
+        dataloader_factory=dataloader_factory,
+        n_trials=1,
+        max_trial_attempts=1,
+        n_splits=2,
+        logging=False,
+        report_evaluator=report_evaluator,
+        final_model_dir=output_dir,
+    )
+
+    dataset = TinyClassificationDataset()
+    payload: dict[str, object]
+    _, _, trainer = cv._build_trainer_for_trial(
+        params={"model/backbone/kwargs/scale_factor": 1.0}
+    )
+    trainer_strategy = trainer.distributed_strategy
+    assert trainer_strategy is not None
+
+    try:
+        trainer_strategy.initialize()
+        raw_report = cv._evaluate_report(trainer, dataset)
+        safe_report = cv._evaluate_report_distributed_safe(trainer, dataset)
+        payload = {
+            "ok": True,
+            "rank": rank,
+            "raw_report": raw_report,
+            "safe_report": safe_report,
+        }
+    except Exception as exc:
+        import traceback
+
+        payload = {
+            "ok": False,
+            "rank": rank,
+            "error": repr(exc),
+            "traceback": traceback.format_exc(),
+        }
+    finally:
+        torch.save(payload, Path(output_dir) / f"report_rank_{rank}.pt")
+        trainer_strategy.finalize()
+
+
 def _spawn_and_collect(
     worker,
     *,
@@ -568,3 +665,47 @@ def test_distributed_in_memory_optuna_search_broadcasts_attempt_exhaustion_to_al
     assert "OptunaSearchCV produced no successful trials." in rank1["error"]
     assert "synthetic distributed prune" in rank0["error"]
     assert "synthetic distributed prune" in rank1["error"]
+
+
+@pytest.mark.skipif(not torch.distributed.is_available(), reason="torch.distributed is unavailable")
+def test_distributed_safe_report_evaluation_uses_full_dataset_on_all_ranks() -> None:
+    results = _spawn_and_collect(_distributed_report_worker, file_prefix="report_rank_")
+
+    assert len(results) == 2
+    rank0, rank1 = results
+    assert rank0["ok"], rank0.get("traceback")
+    assert rank1["ok"], rank1.get("traceback")
+    assert rank0["raw_report"]["clf/n_samples"] == 8
+    assert rank1["raw_report"]["clf/n_samples"] == 8
+    assert rank0["safe_report"]["clf/n_samples"] == 16
+    assert rank1["safe_report"]["clf/n_samples"] == 16
+    assert rank0["safe_report"]["clf/accuracy"] == pytest.approx(1.0)
+    assert rank1["safe_report"]["clf/accuracy"] == pytest.approx(1.0)
+    assert rank0["safe_report"] == rank1["safe_report"]
+
+
+def test_ddp_strategy_barrier_passes_local_device_id_for_nccl(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def _fake_barrier(*, group, device_ids=None):
+        calls.append({
+            "group": group,
+            "device_ids": list(device_ids) if device_ids is not None else None,
+        })
+
+    monkeypatch.setattr(dist, "barrier", _fake_barrier)
+
+    process_group = object()
+    strategy = DDPStrategy(
+        config=DistributedConfig(enabled=True, backend="nccl"),
+        context=DistributedContext(
+            global_rank=1,
+            world_size=2,
+            local_rank=1,
+        ),
+        process_group=process_group,
+    )
+
+    strategy.barrier()
+
+    assert calls == [{"group": process_group, "device_ids": [1]}]
